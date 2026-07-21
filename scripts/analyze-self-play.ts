@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -222,6 +223,10 @@ function rounded(value: number): string {
   return Math.round(value).toLocaleString("en-US");
 }
 
+function sha256(data: Uint8Array): string {
+  return createHash("sha256").update(data).digest("hex");
+}
+
 const options = parseArguments();
 const manifest = JSON.parse(await readFile(resolve(options.input, "manifest.json"), "utf8"));
 if (manifest.status !== "complete" && !options.allowRunning) {
@@ -233,6 +238,40 @@ const shardEntries = manifest.status === "complete"
   : manifest.shards;
 const expectedPositions = shardEntries.reduce((sum: number, shard: { records: number }) => sum + shard.records, 0);
 const errors: string[] = [];
+let provenanceAudit: {
+  present: boolean;
+  valid: boolean;
+  commit: string | null;
+  checks: Record<string, boolean>;
+} = { present: false, valid: false, commit: null, checks: {} };
+
+try {
+  const provenance = JSON.parse(await readFile(resolve(options.input, "PROVENANCE.json"), "utf8"));
+  const checks: Record<string, boolean> = {
+    startedAt: provenance.run.startedAt === manifest.startedAt,
+    deadline: provenance.run.deadline === manifest.deadline,
+    seed: provenance.run.baseSeed === manifest.options.seed,
+    hours: provenance.run.requestedHours === manifest.options.hours,
+    engine: sha256(await readFile(new URL("../app/game-engine.ts", import.meta.url))) === provenance.generator.engineSha256,
+    generator: sha256(await readFile(new URL("generate-self-play.ts", import.meta.url))) === provenance.generator.generatorSha256,
+    csw24Kwg: sha256(await readFile(new URL("../public/data/CSW24.kwg", import.meta.url))) === provenance.assets.CSW24.kwgSha256,
+    csw24Bags: sha256(await readFile(new URL("../public/data/csw24-bags.txt", import.meta.url))) === provenance.assets.CSW24.bagsSha256,
+    nwl23Kwg: sha256(await readFile(new URL("../public/data/NWL23.kwg", import.meta.url))) === provenance.assets.NWL23.kwgSha256,
+    nwl23Bags: sha256(await readFile(new URL("../public/data/nwl23-bags.txt", import.meta.url))) === provenance.assets.NWL23.bagsSha256,
+  };
+  provenanceAudit = {
+    present: true,
+    valid: Object.values(checks).every(Boolean),
+    commit: provenance.generator.commit,
+    checks,
+  };
+  for (const [name, passed] of Object.entries(checks)) {
+    if (!passed) errors.push(`Provenance check failed: ${name}`);
+  }
+} catch (error) {
+  errors.push(`Provenance could not be verified: ${error instanceof Error ? error.message : String(error)}`);
+}
+
 let invalidRecords = 0;
 let decodedPositions = 0;
 let duplicatePositions = 0;
@@ -242,6 +281,7 @@ const seenPositions = new Set<bigint>();
 const episodes = new Map<string, EpisodeState>();
 const byDepth = new Map<string, GroupStats>();
 const byLexicon = new Map<string, GroupStats>();
+const byPolicyLexicon = new Map<string, GroupStats>();
 const splitEpisodes = { train: new Set<string>(), validation: new Set<string>(), test: new Set<string>() };
 const splitPositions = { train: 0, validation: 0, test: 0 };
 const metrics = {
@@ -367,8 +407,11 @@ for (const shard of shardEntries as Array<{ file: string; records: number; bytes
     const lexiconKey = String(record.lexicon);
     if (!byDepth.has(depthKey)) byDepth.set(depthKey, groupStats());
     if (!byLexicon.has(lexiconKey)) byLexicon.set(lexiconKey, groupStats());
+    const policyLexiconKey = `${depthKey}-${lexiconKey}`;
+    if (!byPolicyLexicon.has(policyLexiconKey)) byPolicyLexicon.set(policyLexiconKey, groupStats());
     addGroup(byDepth.get(depthKey)!, record);
     addGroup(byLexicon.get(lexiconKey)!, record);
+    addGroup(byPolicyLexicon.get(policyLexiconKey)!, record);
 
     const split = seed % 10 === 9 ? "test" : seed % 10 === 8 ? "validation" : "train";
     splitEpisodes[split].add(episodeId);
@@ -437,12 +480,14 @@ const results = {
     decodedMatchesManifest: decodedPositions === expectedPositions,
     episodeSummariesMatch: summaries.length === episodes.size,
   },
+  provenance: provenanceAudit,
   outcomes: {
     completedEpisodes: [...episodes.values()].filter((episode) => episode.completed).length,
     topOutEpisodes: [...episodes.values()].filter((episode) => !episode.completed).length,
   },
   byDepth: Object.fromEntries([...byDepth.entries()].map(([key, value]) => [key, serializeGroup(value)])),
   byLexicon: Object.fromEntries([...byLexicon.entries()].map(([key, value]) => [key, serializeGroup(value)])),
+  byPolicyLexicon: Object.fromEntries([...byPolicyLexicon.entries()].map(([key, value]) => [key, serializeGroup(value)])),
   splits: {
     method: "episode seed modulo 10: 0-7 train, 8 validation, 9 test",
     train: { episodes: splitEpisodes.train.size, positions: splitPositions.train },
@@ -485,6 +530,20 @@ ${results.quality.valid ? "**PASS** — every finalized shard, record, episode s
 | --- | ---: | ---: | ---: |
 ${Object.entries(results.byDepth).map(([key, value]) => `| Depth ${key} | ${rounded(value.episodes)} | ${rounded(value.positions)} | ${rounded(value.terminalScore.mean)} |`).join("\n")}
 ${Object.entries(results.byLexicon).map(([key, value]) => `| ${key} | ${rounded(value.episodes)} | ${rounded(value.positions)} | ${rounded(value.terminalScore.mean)} |`).join("\n")}
+
+### Depth × lexicon interaction
+
+| Policy | Episodes | Positions | Mean terminal score |
+| --- | ---: | ---: | ---: |
+${Object.entries(results.byPolicyLexicon).map(([key, value]) => `| ${key.replace("-", " · ")} | ${rounded(value.episodes)} | ${rounded(value.positions)} | ${rounded(value.terminalScore.mean)} |`).join("\n")}
+
+## Provenance
+
+| Check | Result |
+| --- | --- |
+| Provenance file | ${results.provenance.present ? "Present" : "Missing"} |
+| Generator commit | ${results.provenance.commit ?? "Unknown"} |
+${Object.entries(results.provenance.checks).map(([key, passed]) => `| ${key} | ${passed ? "PASS" : "FAIL"} |`).join("\n")}
 
 ## Label health
 
