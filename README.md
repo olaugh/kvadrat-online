@@ -31,6 +31,8 @@ Use **Hint** to inspect its recommendation or **Watch bot** to let it play.
 | Hard drop | Space | D-pad up |
 | Rotate clockwise | X or Up | A / Cross |
 | Rotate counterclockwise | Z | B / Circle |
+| Cycle letters left | C | X / Square |
+| Cycle letters right | V | Y / Triangle |
 | Pause | P or Escape | Start |
 | Restart | R | Select / Back |
 

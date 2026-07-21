@@ -14,7 +14,7 @@ import {
 
 const KEYBOARD_KEYS = new Set([
   "ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp", "Space", "KeyZ",
-  "KeyX", "KeyP", "Escape", "KeyR",
+  "KeyX", "KeyC", "KeyV", "KeyP", "Escape", "KeyR",
 ]);
 
 function formatTime(milliseconds: number): string {
@@ -152,10 +152,15 @@ export default function KvadratGameView() {
       if (code === "ArrowRight") changed = engine.move(1);
       if (code === "ArrowUp" || code === "KeyX") changed = engine.rotate(1);
       if (code === "KeyZ") changed = engine.rotate(-1);
+      if (code === "KeyC") changed = engine.cycleLetters(-1);
+      if (code === "KeyV") changed = engine.cycleLetters(1);
       if (code === "Space") changed = engine.hardDrop();
       if (code === "KeyP" || code === "Escape") changed = engine.togglePause();
       if (code === "KeyR") { engine.reset(); changed = true; }
-      if (changed) refresh();
+      if (changed) {
+        if (code === "KeyC" || code === "KeyV") setBotPlan(null);
+        refresh();
+      }
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -235,6 +240,16 @@ export default function KvadratGameView() {
           if (edge(12)) changed = engine.hardDrop() || changed;
           if (edge(0)) changed = engine.rotate(1) || changed;
           if (edge(1)) changed = engine.rotate(-1) || changed;
+          if (edge(2)) {
+            const lettersChanged = engine.cycleLetters(-1);
+            changed = lettersChanged || changed;
+            if (lettersChanged) setBotPlan(null);
+          }
+          if (edge(3)) {
+            const lettersChanged = engine.cycleLetters(1);
+            changed = lettersChanged || changed;
+            if (lettersChanged) setBotPlan(null);
+          }
           if (edge(9)) changed = engine.togglePause() || changed;
           if (edge(8)) { engine.reset(); changed = true; }
           gamepadButtonsRef.current = pressed;
@@ -474,6 +489,7 @@ export default function KvadratGameView() {
           <span><kbd>↓</kbd> Soft drop</span>
           <span><kbd>Space</kbd> Hard drop</span>
           <span><kbd>Z</kbd><kbd>X</kbd> Rotate</span>
+          <span><kbd>C</kbd><kbd>V</kbd> Letters</span>
           <span><kbd>P</kbd> Pause</span>
           <span><kbd>R</kbd> Restart</span>
         </div>

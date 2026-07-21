@@ -74,7 +74,9 @@ export type GameSnapshot = {
 
 export type BotPlan = {
   piece: PieceName;
+  sourceLetters: string[];
   letters: string[];
+  letterShift: number;
   rotation: number;
   row: number;
   col: number;
@@ -195,6 +197,8 @@ type SearchPiece = {
 
 type SimulatedPlacement = {
   board: Board;
+  letters: string[];
+  letterShift: number;
   rotation: number;
   row: number;
   col: number;
@@ -232,6 +236,22 @@ function shuffledPieces(random: () => number): PieceName[] {
 function scoreWord(text: string): number {
   const rawScore = [...text].reduce((sum, letter) => sum + LETTER_VALUES[letter], 0);
   return rawScore * text.length * text.length;
+}
+
+function shiftedLetters(letters: string[], shift: number): string[] {
+  if (letters.length === 0) return [];
+  const normalized = ((shift % letters.length) + letters.length) % letters.length;
+  return [...letters.slice(normalized), ...letters.slice(0, normalized)];
+}
+
+function uniqueLetterCycles(letters: string[]): Array<{ letters: string[]; shift: number }> {
+  const cycles = new Map<string, { letters: string[]; shift: number }>();
+  for (let shift = 0; shift < letters.length; shift += 1) {
+    const shifted = shiftedLetters(letters, shift);
+    const key = shifted.join("");
+    if (!cycles.has(key)) cycles.set(key, { letters: shifted, shift });
+  }
+  return [...cycles.values()];
 }
 
 export async function loadGameAssets(lexicon: LexiconId = "CSW24"): Promise<GameAssets> {
@@ -383,6 +403,14 @@ export class KvadratGame {
       }
     }
     return false;
+  }
+
+  cycleLetters(direction: -1 | 1): boolean {
+    if (!this.canControl() || !this.active) return false;
+    const shift = direction < 0 ? 1 : this.active.letters.length - 1;
+    this.active.letters = shiftedLetters(this.active.letters, shift);
+    this.lockTimer = 0;
+    return true;
   }
 
   hardDrop(): boolean {
@@ -594,45 +622,49 @@ export class KvadratGame {
   private simulatePlacements(board: Board, piece: SearchPiece): SimulatedPlacement[] {
     const placements: SimulatedPlacement[] = [];
 
-    for (let rotation = 0; rotation < 4; rotation += 1) {
-      const blocks = ROTATIONS[piece.piece][rotation];
-      const minX = Math.min(...blocks.map((block) => block.x));
-      const maxX = Math.max(...blocks.map((block) => block.x));
-      const minY = Math.min(...blocks.map((block) => block.y));
+    for (const cycle of uniqueLetterCycles(piece.letters)) {
+      for (let rotation = 0; rotation < 4; rotation += 1) {
+        const blocks = ROTATIONS[piece.piece][rotation];
+        const minX = Math.min(...blocks.map((block) => block.x));
+        const maxX = Math.max(...blocks.map((block) => block.x));
+        const minY = Math.min(...blocks.map((block) => block.y));
 
-      for (let col = -minX; col < BOARD_WIDTH - maxX; col += 1) {
-        let row = -minY;
-        if (this.collidesOnBoard(board, piece, rotation, row, col)) continue;
-        while (!this.collidesOnBoard(board, piece, rotation, row + 1, col)) row += 1;
+        for (let col = -minX; col < BOARD_WIDTH - maxX; col += 1) {
+          let row = -minY;
+          if (this.collidesOnBoard(board, piece, rotation, row, col)) continue;
+          while (!this.collidesOnBoard(board, piece, rotation, row + 1, col)) row += 1;
 
-        const placedBoard = board.map((boardRow) => boardRow.slice());
-        for (const block of blocks) {
-          placedBoard[row + block.y][col + block.x] = {
-            letter: piece.letters[block.letterIndex],
-            piece: piece.piece,
-          };
+          const placedBoard = board.map((boardRow) => boardRow.slice());
+          for (const block of blocks) {
+            placedBoard[row + block.y][col + block.x] = {
+              letter: cycle.letters[block.letterIndex],
+              piece: piece.piece,
+            };
+          }
+
+          const clearingRows = placedBoard
+            .map((boardRow, index) => (boardRow.every(Boolean) ? index : -1))
+            .filter((index) => index >= 0);
+          const words = clearingRows.flatMap((rowIndex) => this.analyzeRow(placedBoard[rowIndex]));
+          const score = words.reduce((sum, word) => sum + word.score, 0);
+          const cleared = new Set(clearingRows);
+          const collapsedBoard = placedBoard.filter((_, index) => !cleared.has(index));
+          while (collapsedBoard.length < BOARD_HEIGHT) {
+            collapsedBoard.unshift(Array<StoredCell | null>(BOARD_WIDTH).fill(null));
+          }
+
+          placements.push({
+            board: collapsedBoard,
+            letters: cycle.letters,
+            letterShift: cycle.shift,
+            rotation,
+            row,
+            col,
+            score,
+            lines: clearingRows.length,
+            words,
+          });
         }
-
-        const clearingRows = placedBoard
-          .map((boardRow, index) => (boardRow.every(Boolean) ? index : -1))
-          .filter((index) => index >= 0);
-        const words = clearingRows.flatMap((rowIndex) => this.analyzeRow(placedBoard[rowIndex]));
-        const score = words.reduce((sum, word) => sum + word.score, 0);
-        const cleared = new Set(clearingRows);
-        const collapsedBoard = placedBoard.filter((_, index) => !cleared.has(index));
-        while (collapsedBoard.length < BOARD_HEIGHT) {
-          collapsedBoard.unshift(Array<StoredCell | null>(BOARD_WIDTH).fill(null));
-        }
-
-        placements.push({
-          board: collapsedBoard,
-          rotation,
-          row,
-          col,
-          score,
-          lines: clearingRows.length,
-          words,
-        });
       }
     }
 
@@ -816,17 +848,22 @@ export class KvadratGame {
     const setupWords = rootEvaluation.setupWords.length > 0 ? rootEvaluation.setupWords : best.setupWords;
     const leftmostColumn = Math.min(...ROTATIONS[this.active.piece][best.root.rotation]
       .map((block) => best.root.col + block.x)) + 1;
+    const letterPrefix = best.root.letterShift === 0
+      ? ""
+      : `Cycle letters to ${best.root.letters.join("")}, then `;
     const placementText = `left edge column ${leftmostColumn}, ${best.root.rotation * 90}°`;
-    let reason = `Build from ${placementText} while keeping the surface open for the next ${reachedDepth - 1} piece${reachedDepth === 2 ? "" : "s"}.`;
+    let reason = `${letterPrefix}${letterPrefix ? "build" : "Build"} from ${placementText} while keeping the surface open for the next ${reachedDepth - 1} piece${reachedDepth === 2 ? "" : "s"}.`;
     if (immediateWords.length > 0) {
-      reason = `Bank ${immediateWords.join(" + ")} for ${best.root.score.toLocaleString()} points at ${placementText}.`;
+      reason = `${letterPrefix}${letterPrefix ? "bank" : "Bank"} ${immediateWords.join(" + ")} for ${best.root.score.toLocaleString()} points at ${placementText}.`;
     } else if (setupWords.length > 0) {
-      reason = `Preserve ${setupWords.slice(0, 2).join(" / ")} as live scoring material from ${placementText}.`;
+      reason = `${letterPrefix}${letterPrefix ? "preserve" : "Preserve"} ${setupWords.slice(0, 2).join(" / ")} as live scoring material from ${placementText}.`;
     }
 
     return {
       piece: this.active.piece,
-      letters: [...this.active.letters],
+      sourceLetters: [...this.active.letters],
+      letters: [...best.root.letters],
+      letterShift: best.root.letterShift,
       rotation: best.root.rotation,
       row: best.root.row,
       col: best.root.col,
@@ -845,10 +882,13 @@ export class KvadratGame {
 
   executeBotPlan(plan: BotPlan): boolean {
     if (!this.canControl() || !this.active || this.active.piece !== plan.piece ||
-      this.active.letters.join("") !== plan.letters.join("")) return false;
+      this.active.letters.join("") !== plan.sourceLetters.join("")) return false;
+    const letters = shiftedLetters(this.active.letters, plan.letterShift);
+    if (letters.join("") !== plan.letters.join("")) return false;
     const rotation = ((plan.rotation % 4) + 4) % 4;
     if (this.collidesOnBoard(this.board, this.active, rotation, plan.row, plan.col) ||
       !this.collidesOnBoard(this.board, this.active, rotation, plan.row + 1, plan.col)) return false;
+    this.active.letters = letters;
     this.active.rotation = rotation;
     this.active.row = plan.row;
     this.active.col = plan.col;

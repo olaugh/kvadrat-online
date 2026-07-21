@@ -17,6 +17,14 @@ async function loadAssets(lexicon: LexiconId = "CSW24") {
   return { kwg, wordBags };
 }
 
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state * 1_664_525 + 1_013_904_223) >>> 0;
+    return state / 4_294_967_296;
+  };
+}
+
 test("creates and advances a playable 40-line game", async () => {
   const game = new KvadratGame(await loadAssets());
   const initial = game.getSnapshot();
@@ -55,17 +63,38 @@ test("supports the flagship CSW24 and NWL23 English lexica", async () => {
 });
 
 test("searches future pieces and executes a legal scoring plan", async () => {
-  const game = new KvadratGame(await loadAssets());
+  const game = new KvadratGame(await loadAssets(), seededRandom(2));
+  const sourceLetters = game.getTrainingPosition()!.active.letters;
   const plan = game.findBestMove(2, 24);
   assert.ok(plan);
   assert.equal(plan.depth, 2);
   assert.ok(plan.nodes > 30);
   assert.ok(plan.col >= -3 && plan.col < 10);
   assert.ok(plan.reason.length > 20);
+  assert.equal(plan.sourceLetters.join(""), sourceLetters);
+  assert.ok(plan.letterShift > 0, "the bot should prefer a non-default cyclic letter order here");
+  assert.equal(plan.letters.join(""), sourceLetters.slice(plan.letterShift) + sourceLetters.slice(0, plan.letterShift));
   assert.equal(game.executeBotPlan(plan), true);
 
   const afterMove = game.getSnapshot();
   assert.ok(afterMove.pieces >= 2 || afterMove.phase === "clearing");
+});
+
+test("cycles active letters in both directions with four-step wraparound", async () => {
+  const game = new KvadratGame(await loadAssets(), () => 0.25);
+  const original = game.getTrainingPosition()!.active.letters;
+
+  assert.equal(game.cycleLetters(-1), true);
+  assert.equal(game.getTrainingPosition()!.active.letters, original.slice(1) + original[0]);
+  assert.equal(game.cycleLetters(1), true);
+  assert.equal(game.getTrainingPosition()!.active.letters, original);
+
+  for (let index = 0; index < 4; index += 1) assert.equal(game.cycleLetters(-1), true);
+  assert.equal(game.getTrainingPosition()!.active.letters, original);
+
+  assert.equal(game.togglePause(), true);
+  assert.equal(game.cycleLetters(-1), false);
+  assert.equal(game.getTrainingPosition()!.active.letters, original);
 });
 
 test("exports reproducible model-training position features", async () => {

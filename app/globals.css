@@ -335,7 +335,7 @@ kbd { min-width: 20px; padding: 3px 5px; border: 1px solid rgba(181,198,225,.17)
   .game-layout { grid-template-columns: minmax(160px, 210px) auto minmax(155px, 200px); gap: 16px; }
   .board { height: min(68vh, 590px); }
   .controls-list { gap: 9px; }
-  .controls-list > span:nth-child(2), .controls-list > span:nth-child(5) { display: none; }
+  .controls-list > span:nth-child(2), .controls-list > span:nth-child(6) { display: none; }
 }
 
 @media (max-width: 760px) {
