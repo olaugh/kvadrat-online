@@ -153,6 +153,50 @@ Model hashes, held-out prediction metrics, rerank settings, and the rejected
 paired result are recorded in `public/data/models/MANIFEST.json`. Training data
 and checkpoints remain intentionally excluded from Git.
 
+## Counterfactual root-action experiments
+
+The second training path compares alternative root placements from the same
+position instead of fitting only the move chosen by self-play. It takes unique
+root actions from a depth-3, beam-160 frontier, preserves the original
+depth-3/beam-64 action as candidate zero, and rolls each action forward for
+eight placements with the baseline policy and identical future pieces. This
+produces listwise labels for immediate score plus rollout score, with a top-out
+penalty:
+
+```bash
+npm run counterfactuals -- \
+  --input training-data/your-run \
+  --output training-data/counterfactuals \
+  --positions 10000 --candidates 12 \
+  --search-depth 3 --candidate-beam-width 160 \
+  --rollout-depth 3 --rollout-beam-width 64 --horizon 8
+
+npm run train-counterfactuals -- \
+  --data training-data/counterfactuals/counterfactuals.kvcf \
+  --output training-data/root-ranker --device cpu --epochs 10
+
+npm run export-ranker -- \
+  --input training-data/root-ranker/model.safetensors \
+  --output training-data/root-ranker.kvr
+```
+
+The 10,000-position pilot found substantial candidate-set headroom: an oracle
+over the top 12 improved the eight-move objective by 179.6 points on average.
+The first listwise ranker recovered only 7.2% of that headroom on held-out
+positions. In full games, widening root search without the model improved score
+by 425.6 points (+4.07%, 95% CI +324.8 to +526.4) over 400 paired games. The
+ranker at its tuned 0.5 weight added 16.8 points in a separate 800-game run, but
+the 95% CI was -61.8 to +95.3 and it caused three additional top-outs. It is
+therefore retained as an experiment, not enabled in the web bot. The verified
+next offline policy baseline keeps the depth-3/beam-64 action, adds up to 12
+unique roots from a beam-160 frontier, and chooses among their best leaves with
+the existing heuristic:
+
+```bash
+npm run self-play -- --depths 3 \
+  --root-candidate-beam 160 --root-candidates 12
+```
+
 ## Game data
 
 The web build ships CSW24 for World English and NWL23 for North American

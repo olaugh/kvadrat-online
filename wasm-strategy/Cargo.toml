@@ -38,3 +38,13 @@ required-features = ["fragment-training"]
 name = "kvadrat-fragment-export"
 path = "src/bin/kvadrat-fragment-export.rs"
 required-features = ["fragment-training"]
+
+[[bin]]
+name = "kvadrat-counterfactual-train"
+path = "src/bin/kvadrat-counterfactual-train.rs"
+required-features = ["fragment-training"]
+
+[[bin]]
+name = "kvadrat-rank-export"
+path = "src/bin/kvadrat-rank-export.rs"
+required-features = ["fragment-training"]

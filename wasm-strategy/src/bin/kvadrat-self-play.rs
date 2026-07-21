@@ -1,8 +1,8 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use flate2::{Compression, write::GzEncoder};
 use kvadrat_strategy::native::{
-    BoardEvaluation, FragmentModelPair, FragmentRerank, HEIGHT, PackedBoard, Piece, SearchOutcome,
-    Strategy, WIDTH,
+    BoardEvaluation, FragmentModelPair, FragmentRerank, HEIGHT, PackedBoard, Piece, RootRankModel,
+    RootRerank, SearchOutcome, Strategy, WIDTH,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -34,11 +34,18 @@ struct Options {
     seed: u32,
     shard_records: usize,
     depths: Vec<usize>,
+    beam_width: Option<usize>,
     threads: usize,
     fragment_full: Option<PathBuf>,
     fragment_context: Option<PathBuf>,
     fragment_weight: f64,
     fragment_candidates: usize,
+    root_candidate_beam: Option<usize>,
+    root_candidates: usize,
+    root_ranker: Option<PathBuf>,
+    root_ranker_candidate_beam: usize,
+    root_ranker_candidates: usize,
+    root_ranker_weight: f64,
 }
 
 #[derive(Clone)]
@@ -53,6 +60,7 @@ struct Assets {
     csw24: LexiconAssets,
     nwl23: LexiconAssets,
     fragment_model: Option<Arc<FragmentModelPair>>,
+    root_ranker: Option<Arc<RootRankModel>>,
 }
 
 impl Assets {
@@ -372,6 +380,16 @@ impl GameState {
             .collect()
     }
 
+    fn root_visible(&mut self, assets: &LexiconAssets) -> Vec<Piece> {
+        self.ensure_queues(assets);
+        self.piece_queue
+            .iter()
+            .zip(self.letter_queue.iter())
+            .take(5)
+            .map(|(&kind, &letters)| Piece { kind, letters })
+            .collect()
+    }
+
     fn position(&mut self, assets: &LexiconAssets) -> Result<Position> {
         self.ensure_queues(assets);
         let active = self
@@ -464,6 +482,13 @@ fn parse_options(root: &Path) -> Result<Options> {
     if threads == 0 {
         return Err("--threads must be at least 1".into());
     }
+    let beam_width = values
+        .get("beam-width")
+        .map(|value| value.parse::<usize>())
+        .transpose()?;
+    if beam_width.is_some_and(|width| !(12..=160).contains(&width)) {
+        return Err("--beam-width must be from 12 through 160".into());
+    }
     let stamp = Utc::now().format("%Y-%m-%dT%H-%M-%S%.3fZ");
     let output = values.get("output").map_or_else(
         || root.join(format!("training-data/selfplay-{stamp}")),
@@ -512,6 +537,55 @@ fn parse_options(root: &Path) -> Result<Options> {
     if !(1..=160).contains(&fragment_candidates) {
         return Err("--fragment-candidates must be from 1 through 160".into());
     }
+    let root_candidate_beam = values
+        .get("root-candidate-beam")
+        .map(|value| value.parse::<usize>())
+        .transpose()?;
+    if root_candidate_beam.is_some_and(|width| !(12..=160).contains(&width)) {
+        return Err("--root-candidate-beam must be from 12 through 160".into());
+    }
+    let root_candidates = values
+        .get("root-candidates")
+        .map(String::as_str)
+        .unwrap_or("12")
+        .parse()?;
+    if !(1..=160).contains(&root_candidates) {
+        return Err("--root-candidates must be from 1 through 160".into());
+    }
+    let root_ranker = optional_path("root-ranker")?;
+    if root_ranker.is_some() && fragment_full.is_some() {
+        return Err("--root-ranker cannot be combined with the fragment model options".into());
+    }
+    if root_candidate_beam.is_some() && (root_ranker.is_some() || fragment_full.is_some()) {
+        return Err("--root-candidate-beam cannot be combined with learned model options".into());
+    }
+    if root_ranker.is_some() && depths.iter().any(|&depth| depth != 3) {
+        return Err("--root-ranker currently requires --depths 3".into());
+    }
+    let root_ranker_candidate_beam = values
+        .get("root-ranker-candidate-beam")
+        .map(String::as_str)
+        .unwrap_or("160")
+        .parse()?;
+    if !(12..=160).contains(&root_ranker_candidate_beam) {
+        return Err("--root-ranker-candidate-beam must be from 12 through 160".into());
+    }
+    let root_ranker_candidates = values
+        .get("root-ranker-candidates")
+        .map(String::as_str)
+        .unwrap_or("12")
+        .parse()?;
+    if !(1..=160).contains(&root_ranker_candidates) {
+        return Err("--root-ranker-candidates must be from 1 through 160".into());
+    }
+    let root_ranker_weight = values
+        .get("root-ranker-weight")
+        .map(String::as_str)
+        .unwrap_or("1")
+        .parse()?;
+    if !matches!(root_ranker_weight, value if f64::is_finite(value) && value >= 0.0) {
+        return Err("--root-ranker-weight must be finite and nonnegative".into());
+    }
     Ok(Options {
         hours,
         max_games: values
@@ -527,11 +601,18 @@ fn parse_options(root: &Path) -> Result<Options> {
             .parse()?,
         shard_records,
         depths,
+        beam_width,
         threads,
         fragment_full,
         fragment_context,
         fragment_weight,
         fragment_candidates,
+        root_candidate_beam,
+        root_candidates,
+        root_ranker,
+        root_ranker_candidate_beam,
+        root_ranker_candidates,
+        root_ranker_weight,
     })
 }
 
@@ -547,10 +628,18 @@ fn load_assets(root: &Path, options: &Options) -> Result<Assets> {
             )?))
         })
         .transpose()?;
+    let root_ranker = options
+        .root_ranker
+        .as_ref()
+        .map(|path| -> Result<Arc<RootRankModel>> {
+            Ok(Arc::new(RootRankModel::from_bytes(&fs::read(path)?)?))
+        })
+        .transpose()?;
     Ok(Assets {
         csw24: load_lexicon(root, "CSW24", 0)?,
         nwl23: load_lexicon(root, "NWL23", 1)?,
         fragment_model,
+        root_ranker,
     })
 }
 
@@ -739,9 +828,10 @@ fn run_game(
     options: &Options,
     assets: &LexiconAssets,
     fragment_model: Option<&FragmentModelPair>,
+    root_ranker: Option<&RootRankModel>,
 ) -> Result<EpisodeResult> {
     let depth = options.depths[game_index as usize % options.depths.len()];
-    let width = beam_width(depth);
+    let width = options.beam_width.unwrap_or_else(|| beam_width(depth));
     let seed = game_seed(options.seed, game_index);
     let episode_id = format!("{started_at}-{game_index:07}");
     let began = Instant::now();
@@ -753,7 +843,32 @@ fn run_game(
         let active = game.active.ok_or("playing game lacks an active piece")?;
         let position = game.position(assets)?;
         let sequence = game.sequence(assets, depth);
-        let outcome = if let Some(model) = fragment_model {
+        let outcome = if let Some(model) = root_ranker {
+            let root_visible = game.root_visible(assets);
+            assets.strategy.find_best_move_with_root_ranker(
+                &game.board,
+                game.current.lines as u8,
+                &sequence,
+                width,
+                RootRerank {
+                    visible_after_root: &root_visible,
+                    model,
+                    lexicon: assets.id,
+                    candidate_beam_width: options.root_ranker_candidate_beam,
+                    candidates: options.root_ranker_candidates,
+                    correction_weight: options.root_ranker_weight,
+                },
+            )
+        } else if let Some(candidate_beam_width) = options.root_candidate_beam {
+            assets.strategy.find_best_move_with_root_candidates(
+                &game.board,
+                game.current.lines as u8,
+                &sequence,
+                width,
+                candidate_beam_width,
+                options.root_candidates,
+            )
+        } else if let Some(model) = fragment_model {
             let leaf_visible = game.leaf_visible(assets, depth);
             assets.strategy.find_best_move_with_fragment_model(
                 &game.board,
@@ -997,11 +1112,18 @@ impl<'a> CorpusWriter<'a> {
                 "seed": self.options.seed,
                 "shardRecords": self.options.shard_records,
                 "depths": self.options.depths,
+                "beamWidth": self.options.beam_width,
                 "threads": self.options.threads,
                 "fragmentFull": self.options.fragment_full,
                 "fragmentContext": self.options.fragment_context,
                 "fragmentWeight": self.options.fragment_weight,
                 "fragmentCandidates": self.options.fragment_candidates,
+                "rootCandidateBeam": self.options.root_candidate_beam,
+                "rootCandidates": self.options.root_candidates,
+                "rootRanker": self.options.root_ranker,
+                "rootRankerCandidateBeam": self.options.root_ranker_candidate_beam,
+                "rootRankerCandidates": self.options.root_ranker_candidates,
+                "rootRankerWeight": self.options.root_ranker_weight,
             },
             "aggregate": self.aggregate,
             "byDepth": self.by_depth,
@@ -1119,6 +1241,19 @@ fn write_provenance(
             }))
         })
         .transpose()?;
+    let root_ranker = options
+        .root_ranker
+        .as_ref()
+        .map(|path| -> Result<Value> {
+            Ok(json!({
+                "path": path,
+                "sha256": sha256_file(path)?,
+                "candidateBeam": options.root_ranker_candidate_beam,
+                "candidates": options.root_ranker_candidates,
+                "weight": options.root_ranker_weight,
+            }))
+        })
+        .transpose()?;
     let provenance = json!({
         "schemaVersion": 1,
         "run": {
@@ -1126,6 +1261,9 @@ fn write_provenance(
             "deadline": rfc3339(deadline),
             "baseSeed": options.seed,
             "requestedHours": options.hours,
+            "beamWidth": options.beam_width,
+            "rootCandidateBeam": options.root_candidate_beam,
+            "rootCandidates": options.root_candidates,
             "threads": options.threads,
         },
         "generator": {
@@ -1145,6 +1283,7 @@ fn write_provenance(
                 "bagsSha256": sha256_file(&data.join("nwl23-bags.txt"))?,
             },
             "fragmentModel": fragment_model,
+            "rootRanker": root_ranker,
         },
     });
     let mut file = File::create(output.join("PROVENANCE.json"))?;
@@ -1203,6 +1342,7 @@ fn run() -> Result<()> {
                     &options,
                     lexicon,
                     assets.fragment_model.as_deref(),
+                    assets.root_ranker.as_deref(),
                 );
                 let failed = result.is_err();
                 if sender.send(WorkerMessage { game_index, result }).is_err() {

@@ -3,6 +3,8 @@ use std::cmp::Ordering;
 use std::slice;
 
 mod fragment_model;
+#[cfg(not(target_arch = "wasm32"))]
+mod root_ranker;
 
 #[cfg(target_arch = "wasm32")]
 thread_local! {
@@ -385,6 +387,13 @@ struct SearchResult {
     evaluation: i32,
 }
 
+struct SearchFrontier {
+    roots: Vec<Placement>,
+    states: Vec<SearchState>,
+    reached_depth: u8,
+    nodes: u32,
+}
+
 type LeafReranker<'a> = &'a dyn Fn(&Board, u16) -> f64;
 
 fn cell_letter(cell: u8) -> u8 {
@@ -715,15 +724,13 @@ fn js_round(value: f64) -> i32 {
     (value + 0.5).floor() as i32
 }
 
-fn search(
+fn search_frontier(
     lexicon: &[u32],
     board: Board,
     current_lines: u8,
     sequence: &[SearchPiece],
     beam_width: usize,
-    leaf_reranker: Option<LeafReranker<'_>>,
-    leaf_rerank_candidates: usize,
-) -> Option<SearchResult> {
+) -> Option<SearchFrontier> {
     let root_placements = simulate_placements(lexicon, &board, sequence[0]);
     if root_placements.is_empty() {
         return None;
@@ -782,15 +789,35 @@ fn search(
 
     frontier.extend(finished);
     frontier.sort_by(compare_states);
+    Some(SearchFrontier {
+        roots: root_placements,
+        states: frontier,
+        reached_depth,
+        nodes,
+    })
+}
+
+fn search(
+    lexicon: &[u32],
+    board: Board,
+    current_lines: u8,
+    sequence: &[SearchPiece],
+    beam_width: usize,
+    leaf_reranker: Option<LeafReranker<'_>>,
+    leaf_rerank_candidates: usize,
+) -> Option<SearchResult> {
+    let mut search = search_frontier(lexicon, board, current_lines, sequence, beam_width)?;
     if let Some(rerank) = leaf_reranker {
-        frontier.truncate(leaf_rerank_candidates.clamp(1, beam_width));
-        for state in &mut frontier {
+        search
+            .states
+            .truncate(leaf_rerank_candidates.clamp(1, beam_width));
+        for state in &mut search.states {
             state.value += rerank(&state.board, state.lines);
         }
-        frontier.sort_by(compare_states);
+        search.states.sort_by(compare_states);
     }
-    let best = *frontier.first()?;
-    let root = root_placements[best.root_index as usize];
+    let best = *search.states.first()?;
+    let root = search.roots[best.root_index as usize];
     let root_evaluation = evaluate_board(lexicon, &root.board);
     let setup_words = if root_evaluation.setup_words.len > 0 {
         root_evaluation.setup_words
@@ -803,8 +830,8 @@ fn search(
         projected_score: best.score,
         projected_lines: best.lines,
         setup_words,
-        depth: reached_depth,
-        nodes,
+        depth: search.reached_depth,
+        nodes: search.nodes,
         evaluation: js_round(best.value),
     })
 }
@@ -814,6 +841,7 @@ pub mod native {
     use super::*;
 
     pub use crate::fragment_model::{FragmentModelPair, FragmentPrediction, FragmentResidual};
+    pub use crate::root_ranker::RootRankModel;
 
     pub const WIDTH: usize = BOARD_WIDTH;
     pub const HEIGHT: usize = BOARD_HEIGHT;
@@ -866,12 +894,36 @@ pub mod native {
         pub evaluation: i32,
     }
 
+    #[derive(Clone, Debug)]
+    pub struct RootCandidate {
+        pub board: PackedBoard,
+        pub letter_shift: u8,
+        pub rotation: u8,
+        pub row: i8,
+        pub col: i8,
+        pub immediate_score: i32,
+        pub immediate_lines: u8,
+        pub immediate_words: Vec<ScoredWord>,
+        pub projected_score: i32,
+        pub projected_lines: u16,
+        pub heuristic_value: f64,
+    }
+
     pub struct FragmentRerank<'a> {
         pub leaf_visible: &'a [Piece],
         pub model: &'a FragmentModelPair,
         pub lexicon: u8,
         pub weight: f64,
         pub candidates: usize,
+    }
+
+    pub struct RootRerank<'a> {
+        pub visible_after_root: &'a [Piece],
+        pub model: &'a RootRankModel,
+        pub lexicon: u8,
+        pub candidate_beam_width: usize,
+        pub candidates: usize,
+        pub correction_weight: f64,
     }
 
     pub struct Strategy {
@@ -1001,6 +1053,223 @@ pub mod native {
                 0,
             )?;
             Some(result_to_outcome(result))
+        }
+
+        pub fn root_candidates(
+            &self,
+            board: &PackedBoard,
+            current_lines: u8,
+            sequence: &[Piece],
+            beam_width: usize,
+            limit: usize,
+        ) -> Vec<RootCandidate> {
+            if board.iter().any(|&cell| !valid_cell(cell))
+                || !valid_sequence(sequence)
+                || limit == 0
+            {
+                return Vec::new();
+            }
+            let search_pieces = to_search_pieces(sequence);
+            let Some(search) = search_frontier(
+                &self.lexicon,
+                *board,
+                current_lines,
+                &search_pieces,
+                beam_width.clamp(12, 160),
+            ) else {
+                return Vec::new();
+            };
+            let mut seen = vec![false; search.roots.len()];
+            let mut candidates = Vec::with_capacity(limit);
+            for state in search.states {
+                let root_index = state.root_index as usize;
+                if seen[root_index] {
+                    continue;
+                }
+                seen[root_index] = true;
+                let root = search.roots[root_index];
+                candidates.push(RootCandidate {
+                    board: root.board,
+                    letter_shift: root.letter_shift,
+                    rotation: root.rotation,
+                    row: root.row,
+                    col: root.col,
+                    immediate_score: root.score,
+                    immediate_lines: root.lines,
+                    immediate_words: words_to_vec(&root.words),
+                    projected_score: state.score,
+                    projected_lines: state.lines,
+                    heuristic_value: state.value,
+                });
+                if candidates.len() == limit {
+                    break;
+                }
+            }
+            candidates
+        }
+
+        fn root_candidate_pool(
+            &self,
+            board: &PackedBoard,
+            current_lines: u8,
+            sequence: &[Piece],
+            baseline_beam_width: usize,
+            candidate_beam_width: usize,
+            candidate_count: usize,
+        ) -> Option<(SearchOutcome, Vec<RootCandidate>)> {
+            if candidate_count == 0 {
+                return None;
+            }
+            let baseline =
+                self.find_best_move(board, current_lines, sequence, baseline_beam_width)?;
+            let mut candidates = self.root_candidates(
+                board,
+                current_lines,
+                sequence,
+                candidate_beam_width,
+                candidate_count,
+            );
+            if let Some(index) = candidates
+                .iter()
+                .position(|candidate| candidate.board == baseline.board)
+            {
+                let baseline_candidate = candidates.remove(index);
+                candidates.insert(0, baseline_candidate);
+            } else {
+                candidates.insert(
+                    0,
+                    RootCandidate {
+                        board: baseline.board,
+                        letter_shift: baseline.letter_shift,
+                        rotation: baseline.rotation,
+                        row: baseline.row,
+                        col: baseline.col,
+                        immediate_score: baseline.immediate_score,
+                        immediate_lines: baseline.immediate_lines,
+                        immediate_words: baseline.immediate_words.clone(),
+                        projected_score: baseline.projected_score,
+                        projected_lines: baseline.projected_lines,
+                        heuristic_value: f64::from(baseline.evaluation),
+                    },
+                );
+                candidates.truncate(candidate_count);
+            }
+            Some((baseline, candidates))
+        }
+
+        fn root_candidate_outcome(
+            &self,
+            candidate: RootCandidate,
+            depth: usize,
+            nodes: u32,
+            value: f64,
+        ) -> SearchOutcome {
+            let evaluation = evaluate_board(&self.lexicon, &candidate.board);
+            SearchOutcome {
+                board: candidate.board,
+                letter_shift: candidate.letter_shift,
+                rotation: candidate.rotation,
+                row: candidate.row,
+                col: candidate.col,
+                immediate_score: candidate.immediate_score,
+                immediate_lines: candidate.immediate_lines,
+                immediate_words: candidate.immediate_words,
+                projected_score: candidate.projected_score,
+                projected_lines: candidate.projected_lines,
+                setup_words: texts_to_vec(&evaluation.setup_words),
+                depth: depth as u8,
+                nodes,
+                evaluation: js_round(value),
+            }
+        }
+
+        pub fn find_best_move_with_root_candidates(
+            &self,
+            board: &PackedBoard,
+            current_lines: u8,
+            sequence: &[Piece],
+            baseline_beam_width: usize,
+            candidate_beam_width: usize,
+            candidate_count: usize,
+        ) -> Option<SearchOutcome> {
+            let (baseline, mut candidates) = self.root_candidate_pool(
+                board,
+                current_lines,
+                sequence,
+                baseline_beam_width,
+                candidate_beam_width,
+                candidate_count,
+            )?;
+            let mut candidate = candidates.remove(0);
+            for alternative in candidates {
+                // Candidate zero is the baseline. Preserve that choice on exact ties.
+                if alternative.heuristic_value > candidate.heuristic_value {
+                    candidate = alternative;
+                }
+            }
+            let value = candidate.heuristic_value;
+            Some(self.root_candidate_outcome(candidate, sequence.len(), baseline.nodes, value))
+        }
+
+        pub fn find_best_move_with_root_ranker(
+            &self,
+            board: &PackedBoard,
+            current_lines: u8,
+            sequence: &[Piece],
+            baseline_beam_width: usize,
+            reranker: RootRerank<'_>,
+        ) -> Option<SearchOutcome> {
+            if board.iter().any(|&cell| !valid_cell(cell))
+                || !valid_sequence(sequence)
+                || reranker.visible_after_root.len() != 5
+                || !valid_sequence(reranker.visible_after_root)
+                || reranker.lexicon > 1
+                || reranker.candidates == 0
+                || !reranker.correction_weight.is_finite()
+            {
+                return None;
+            }
+            let (baseline, candidates) = self.root_candidate_pool(
+                board,
+                current_lines,
+                sequence,
+                baseline_beam_width,
+                reranker.candidate_beam_width,
+                reranker.candidates,
+            )?;
+            let visible = to_search_pieces(reranker.visible_after_root);
+            let mut candidates = candidates.into_iter();
+            let first = candidates.next()?;
+            let first_lines = current_lines.saturating_add(first.immediate_lines);
+            let mut combined = first.heuristic_value / 100.0
+                + f64::from(reranker.model.correction(
+                    &first.board,
+                    &visible,
+                    first_lines,
+                    reranker.lexicon,
+                )) * reranker.correction_weight;
+            let mut candidate = first;
+            for alternative in candidates {
+                let alternative_lines = current_lines.saturating_add(alternative.immediate_lines);
+                let alternative_combined = alternative.heuristic_value / 100.0
+                    + f64::from(reranker.model.correction(
+                        &alternative.board,
+                        &visible,
+                        alternative_lines,
+                        reranker.lexicon,
+                    )) * reranker.correction_weight;
+                // Candidate zero is the baseline. Preserve that choice on exact ties.
+                if alternative_combined > combined {
+                    candidate = alternative;
+                    combined = alternative_combined;
+                }
+            }
+            Some(self.root_candidate_outcome(
+                candidate,
+                sequence.len(),
+                baseline.nodes,
+                combined * 100.0,
+            ))
         }
 
         pub fn find_best_move_with_fragment_model(

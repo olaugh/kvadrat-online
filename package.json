@@ -17,7 +17,10 @@
     "prepare-fragments": "cargo run --release --manifest-path wasm-strategy/Cargo.toml --bin kvadrat-fragments --",
     "train-fragments": "cargo run --release --manifest-path wasm-strategy/Cargo.toml --features fragment-training --bin kvadrat-fragment-train --",
     "export-fragment": "cargo run --release --manifest-path wasm-strategy/Cargo.toml --features fragment-training --bin kvadrat-fragment-export --",
-    "compare-self-play": "cargo run --release --manifest-path wasm-strategy/Cargo.toml --bin kvadrat-compare-runs --"
+    "compare-self-play": "cargo run --release --manifest-path wasm-strategy/Cargo.toml --bin kvadrat-compare-runs --",
+    "counterfactuals": "cargo run --release --manifest-path wasm-strategy/Cargo.toml --bin kvadrat-counterfactuals --",
+    "train-counterfactuals": "cargo run --release --manifest-path wasm-strategy/Cargo.toml --features fragment-training --bin kvadrat-counterfactual-train --",
+    "export-ranker": "cargo run --release --manifest-path wasm-strategy/Cargo.toml --features fragment-training --bin kvadrat-rank-export --"
   },
   "dependencies": {
     "next": "16.2.6",
