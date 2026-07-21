@@ -90,6 +90,36 @@ export type BotPlan = {
   reason: string;
 };
 
+export type TrainingBoardFeatures = {
+  heights: number[];
+  holes: number;
+  buriedDepth: number;
+  aggregateHeight: number;
+  maximumHeight: number;
+  bumpiness: number;
+  wells: number;
+  wordPotential: number;
+  setupWords: string[];
+  heuristicValue: number;
+};
+
+export type TrainingPosition = {
+  board: {
+    letters: string[];
+    pieces: string[];
+  };
+  active: { piece: PieceName; letters: string };
+  next: Array<{ piece: PieceName; letters: string }>;
+  current: {
+    score: number;
+    lines: number;
+    pieces: number;
+    words: number;
+    totalWordLength: number;
+  };
+  features: TrainingBoardFeatures;
+};
+
 export type GameAssets = {
   kwg: Uint32Array;
   wordBags: string[][];
@@ -173,10 +203,7 @@ type SimulatedPlacement = {
   words: WordSegment[];
 };
 
-type BoardEvaluation = {
-  value: number;
-  setupWords: string[];
-};
+type BoardEvaluation = TrainingBoardFeatures & { value: number };
 
 type SearchState = {
   board: Board;
@@ -193,10 +220,10 @@ function emptyBoard(): Board {
   );
 }
 
-function shuffledPieces(): PieceName[] {
+function shuffledPieces(random: () => number): PieceName[] {
   const bag = [...PIECE_NAMES];
   for (let index = bag.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1));
+    const swapIndex = Math.floor(random() * (index + 1));
     [bag[index], bag[swapIndex]] = [bag[swapIndex], bag[index]];
   }
   return bag;
@@ -241,6 +268,7 @@ export async function loadGameAssets(lexicon: LexiconId = "CSW24"): Promise<Game
 export class KvadratGame {
   private readonly kwg: Uint32Array;
   private readonly wordBags: string[][];
+  private readonly random: () => number;
   private board: Board = emptyBoard();
   private pieceQueue: PieceName[] = [];
   private letterQueue: string[] = [];
@@ -263,9 +291,10 @@ export class KvadratGame {
   private recentWords: RecentWord[] = [];
   private wordId = 0;
 
-  constructor(assets: GameAssets) {
+  constructor(assets: GameAssets, random: () => number = Math.random) {
     this.kwg = assets.kwg;
     this.wordBags = assets.wordBags;
+    this.random = random;
     this.reset();
   }
 
@@ -296,9 +325,9 @@ export class KvadratGame {
   }
 
   private ensureQueues(): void {
-    while (this.pieceQueue.length < 14) this.pieceQueue.push(...shuffledPieces());
+    while (this.pieceQueue.length < 14) this.pieceQueue.push(...shuffledPieces(this.random));
     while (this.letterQueue.length < 56) {
-      const bag = this.wordBags[Math.floor(Math.random() * this.wordBags.length)];
+      const bag = this.wordBags[Math.floor(this.random() * this.wordBags.length)];
       this.letterQueue.push(...bag);
     }
   }
@@ -661,10 +690,57 @@ export class KvadratGame {
         .map((candidate) => [candidate.text, candidate]),
     ).values()].slice(0, 4).map((candidate) => candidate.text);
 
+    const heuristicValue = wordPotential - holes * 285 - buriedDepth * 34 - aggregateHeight * 4.5 -
+      maximumHeight * maximumHeight * 1.7 - bumpiness * 8 - wells * 3;
+
     return {
-      value: wordPotential - holes * 285 - buriedDepth * 34 - aggregateHeight * 4.5 -
-        maximumHeight * maximumHeight * 1.7 - bumpiness * 8 - wells * 3,
+      heights,
+      holes,
+      buriedDepth,
+      aggregateHeight,
+      maximumHeight,
+      bumpiness,
+      wells,
+      wordPotential,
       setupWords,
+      heuristicValue,
+      value: heuristicValue,
+    };
+  }
+
+  getTrainingPosition(): TrainingPosition | null {
+    if (!this.active || this.phase !== "playing") return null;
+    this.ensureQueues();
+    const evaluation = this.evaluateBoard(this.board);
+    return {
+      board: {
+        letters: this.board.map((row) => row.map((cell) => cell?.letter ?? ".").join("")),
+        pieces: this.board.map((row) => row.map((cell) => cell?.piece ?? ".").join("")),
+      },
+      active: { piece: this.active.piece, letters: this.active.letters.join("") },
+      next: this.pieceQueue.slice(0, 4).map((piece, index) => ({
+        piece,
+        letters: this.letterQueue[index],
+      })),
+      current: {
+        score: this.score,
+        lines: this.lines,
+        pieces: this.pieces,
+        words: this.words,
+        totalWordLength: this.totalWordLength,
+      },
+      features: {
+        heights: evaluation.heights,
+        holes: evaluation.holes,
+        buriedDepth: evaluation.buriedDepth,
+        aggregateHeight: evaluation.aggregateHeight,
+        maximumHeight: evaluation.maximumHeight,
+        bumpiness: evaluation.bumpiness,
+        wells: evaluation.wells,
+        wordPotential: evaluation.wordPotential,
+        setupWords: evaluation.setupWords,
+        heuristicValue: evaluation.heuristicValue,
+      },
     };
   }
 

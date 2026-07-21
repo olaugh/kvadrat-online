@@ -46,6 +46,20 @@ npm run dev
 Run `npm test` for a production build, server-render test, and engine smoke
 test.
 
+## Self-play data
+
+Generate checkpointed, gzip-compressed JSONL trajectories for training a leaf
+position evaluator with:
+
+```bash
+npm run self-play -- --hours 8 --depths 2,3,4
+```
+
+The generator alternates CSW24 and NWL23, uses reproducible per-game seeds,
+and records raw boards, visible pieces, structural heuristics, chosen moves,
+4/8/16-placement returns, and terminal score-to-go labels. Generated corpora
+are written under `training-data/` and intentionally excluded from Git.
+
 ## Game data
 
 The web build ships CSW24 for World English and NWL23 for North American

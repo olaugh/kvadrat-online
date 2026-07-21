@@ -67,3 +67,16 @@ test("searches future pieces and executes a legal scoring plan", async () => {
   const afterMove = game.getSnapshot();
   assert.ok(afterMove.pieces >= 2 || afterMove.phase === "clearing");
 });
+
+test("exports reproducible model-training position features", async () => {
+  const game = new KvadratGame(await loadAssets(), () => 0.25);
+  const position = game.getTrainingPosition();
+  assert.ok(position);
+  assert.equal(position.board.letters.length, 22);
+  assert.ok(position.board.letters.every((row) => row.length === 10));
+  assert.ok(position.board.pieces.every((row) => row.length === 10));
+  assert.equal(position.active.letters.length, 4);
+  assert.equal(position.next.length, 4);
+  assert.deepEqual(position.features.heights, Array(10).fill(0));
+  assert.equal(position.features.wordPotential, 0);
+});
