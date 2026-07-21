@@ -12,8 +12,15 @@ playable includes:
 - CSW24 word validation and original word scoring
 - a ghost piece, lock delay, wall kicks, and a 40-line finish
 - keyboard and standard Gamepad API controls
+- four-piece, CSW24-aware beam-search hints and autoplay
 - responsive, high-resolution, procedurally rendered UI
 - device-local high scores
+
+The strategy engine simulates every direct-drop rotation and column for the
+current piece, then retains the strongest continuations across the three visible
+next pieces. It scores banked words exactly and balances live word material
+against holes, height, surface roughness, wells, and the limited 40-line budget.
+Use **Hint** to inspect its recommendation or **Watch bot** to let it play.
 
 ## Controls
 

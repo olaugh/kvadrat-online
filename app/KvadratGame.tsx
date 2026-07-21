@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  BotPlan,
   GameSnapshot,
   KvadratGame,
   MAX_LINES,
@@ -60,6 +61,8 @@ export default function KvadratGameView() {
   const [controller, setController] = useState("");
   const controllerRef = useRef("");
   const [bestScore, setBestScore] = useState(0);
+  const [botEnabled, setBotEnabled] = useState(false);
+  const [botPlan, setBotPlan] = useState<BotPlan | null>(null);
 
   const applySnapshot = useCallback((nextSnapshot: GameSnapshot) => {
     setSnapshot(nextSnapshot);
@@ -77,9 +80,17 @@ export default function KvadratGameView() {
   }, [applySnapshot]);
 
   const restart = useCallback(() => {
+    setBotEnabled(false);
+    setBotPlan(null);
     engineRef.current?.reset();
     refresh();
   }, [refresh]);
+
+  const requestHint = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    setBotPlan(engine.findBestMove(4, 72));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -212,6 +223,39 @@ export default function KvadratGameView() {
     return () => window.cancelAnimationFrame(animationFrame);
   }, [applySnapshot]);
 
+  useEffect(() => {
+    if (!botEnabled) return;
+    let cancelled = false;
+    let timer = 0;
+
+    const playNextMove = () => {
+      if (cancelled) return;
+      const engine = engineRef.current;
+      if (!engine) {
+        timer = window.setTimeout(playNextMove, 160);
+        return;
+      }
+
+      const current = engine.getSnapshot();
+      if (current.phase === "over" || current.phase === "complete") {
+        setBotEnabled(false);
+        return;
+      }
+      if (current.phase === "playing") {
+        const plan = engine.findBestMove(4, 72);
+        setBotPlan(plan);
+        if (plan && engine.executeBotPlan(plan)) applySnapshot(engine.getSnapshot());
+      }
+      timer = window.setTimeout(playNextMove, current.phase === "clearing" ? 140 : 680);
+    };
+
+    timer = window.setTimeout(playNextMove, 120);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [applySnapshot, botEnabled]);
+
   if (loadError) {
     return (
       <main className="loading-screen">
@@ -254,6 +298,12 @@ export default function KvadratGameView() {
         </div>
         <div className="session-actions">
           <span className={`status-pill ${snapshot.phase}`}><i />{phaseLabel}</span>
+          <button
+            className={botEnabled ? "bot-toggle active" : "bot-toggle"}
+            onClick={() => setBotEnabled((enabled) => !enabled)}
+          >
+            {botEnabled ? "Stop bot" : "Watch bot"}
+          </button>
           <button onClick={() => { engineRef.current?.togglePause(); refresh(); }}>
             {snapshot.phase === "paused" ? "Resume" : "Pause"}
           </button>
@@ -332,6 +382,40 @@ export default function KvadratGameView() {
               <MiniPiece preview={preview} featured={index === 0} key={`${preview.piece}-${index}`} />
             ))}
           </div>
+          <div className="bot-panel">
+            <div className="panel-heading">
+              <span>Strategy engine</span>
+              <small>{botEnabled ? "Autoplay" : botPlan ? `Depth ${botPlan.depth}` : "CSW24 beam"}</small>
+            </div>
+            <div className="bot-readout" aria-live="polite">
+              {botPlan ? (
+                <>
+                  <div className="bot-metrics">
+                    <span>{botPlan.nodes.toLocaleString()} nodes</span>
+                    <span>{botPlan.projectedLines} line{botPlan.projectedLines === 1 ? "" : "s"} forecast</span>
+                  </div>
+                  <p>{botPlan.reason}</p>
+                  {(botPlan.projectedScore > 0 || botPlan.setupWords.length > 0) && (
+                    <div className="bot-chips">
+                      {botPlan.projectedScore > 0 && <span>+{botPlan.projectedScore.toLocaleString()} projected</span>}
+                      {botPlan.setupWords.slice(0, 2).map((word) => <span key={word}>{word}</span>)}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p>Search four known pieces for score, word setups, and a stable board.</p>
+              )}
+            </div>
+            <div className="bot-actions">
+              <button onClick={requestHint} disabled={snapshot.phase !== "playing"}>Hint</button>
+              <button
+                className={botEnabled ? "active" : ""}
+                onClick={() => setBotEnabled((enabled) => !enabled)}
+              >
+                {botEnabled ? "Stop" : "Watch bot"}
+              </button>
+            </div>
+          </div>
           <div className="word-feed">
             <div className="panel-heading"><span>Word feed</span><small>Banked</small></div>
             {snapshot.recentWords.length ? snapshot.recentWords.map((word) => (
@@ -356,7 +440,7 @@ export default function KvadratGameView() {
           <span><kbd>P</kbd> Pause</span>
           <span><kbd>R</kbd> Restart</span>
         </div>
-        <span className="build-label">FIRST PLAYABLE · WEB</span>
+        <span className="build-label">SCORING BOT · DEPTH 4</span>
       </footer>
     </main>
   );

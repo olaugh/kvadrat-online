@@ -46,3 +46,17 @@ test("validates CSW24-specific additions", async () => {
   assert.equal(game.isValidWord("RESPAWN"), true);
   assert.equal(game.isValidWord("ALF"), false);
 });
+
+test("searches future pieces and executes a legal scoring plan", async () => {
+  const game = new KvadratGame(await loadAssets());
+  const plan = game.findBestMove(2, 24);
+  assert.ok(plan);
+  assert.equal(plan.depth, 2);
+  assert.ok(plan.nodes > 30);
+  assert.ok(plan.col >= 0 && plan.col < 10);
+  assert.ok(plan.reason.length > 20);
+  assert.equal(game.executeBotPlan(plan), true);
+
+  const afterMove = game.getSnapshot();
+  assert.ok(afterMove.pieces >= 2 || afterMove.phase === "clearing");
+});

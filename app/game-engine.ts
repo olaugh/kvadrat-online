@@ -66,6 +66,24 @@ export type GameSnapshot = {
   recentWords: RecentWord[];
 };
 
+export type BotPlan = {
+  piece: PieceName;
+  letters: string[];
+  rotation: number;
+  row: number;
+  col: number;
+  immediateScore: number;
+  immediateLines: number;
+  immediateWords: string[];
+  projectedScore: number;
+  projectedLines: number;
+  setupWords: string[];
+  depth: number;
+  nodes: number;
+  evaluation: number;
+  reason: string;
+};
+
 export type GameAssets = {
   kwg: Uint32Array;
   wordBags: string[][];
@@ -132,6 +150,36 @@ const KWG_IS_END = 0x400000;
 const KWG_ACCEPTS = 0x800000;
 const KWG_ARC_MASK = 0x3fffff;
 const MINIMUM_WORD_SCORE = 40;
+const DEFAULT_GRAVITY_MS = 360;
+
+type SearchPiece = {
+  piece: PieceName;
+  letters: string[];
+};
+
+type SimulatedPlacement = {
+  board: Board;
+  rotation: number;
+  row: number;
+  col: number;
+  score: number;
+  lines: number;
+  words: WordSegment[];
+};
+
+type BoardEvaluation = {
+  value: number;
+  setupWords: string[];
+};
+
+type SearchState = {
+  board: Board;
+  score: number;
+  lines: number;
+  root: SimulatedPlacement;
+  value: number;
+  setupWords: string[];
+};
 
 function emptyBoard(): Board {
   return Array.from({ length: BOARD_HEIGHT }, () =>
@@ -338,7 +386,7 @@ export class KvadratGame {
 
     if (!this.active) return false;
     let changed = false;
-    const interval = softDrop ? 34 : 220;
+    const interval = softDrop ? 34 : DEFAULT_GRAVITY_MS;
     this.gravityTimer += delta;
     while (this.gravityTimer >= interval) {
       this.gravityTimer -= interval;
@@ -490,6 +538,239 @@ export class KvadratGame {
         for (let col = word.start; col <= word.end; col += 1) this.marks[row][col] = word.score;
       }
     }
+  }
+
+  private collidesOnBoard(
+    board: Board,
+    piece: SearchPiece,
+    rotation: number,
+    row: number,
+    col: number,
+  ): boolean {
+    return ROTATIONS[piece.piece][rotation].some((block) => {
+      const boardRow = row + block.y;
+      const boardCol = col + block.x;
+      return boardRow < 0 || boardRow >= BOARD_HEIGHT || boardCol < 0 ||
+        boardCol >= BOARD_WIDTH || board[boardRow][boardCol] !== null;
+    });
+  }
+
+  private simulatePlacements(board: Board, piece: SearchPiece): SimulatedPlacement[] {
+    const placements: SimulatedPlacement[] = [];
+
+    for (let rotation = 0; rotation < 4; rotation += 1) {
+      const blocks = ROTATIONS[piece.piece][rotation];
+      const minX = Math.min(...blocks.map((block) => block.x));
+      const maxX = Math.max(...blocks.map((block) => block.x));
+      const minY = Math.min(...blocks.map((block) => block.y));
+
+      for (let col = -minX; col < BOARD_WIDTH - maxX; col += 1) {
+        let row = -minY;
+        if (this.collidesOnBoard(board, piece, rotation, row, col)) continue;
+        while (!this.collidesOnBoard(board, piece, rotation, row + 1, col)) row += 1;
+
+        const placedBoard = board.map((boardRow) => boardRow.slice());
+        for (const block of blocks) {
+          placedBoard[row + block.y][col + block.x] = {
+            letter: piece.letters[block.letterIndex],
+            piece: piece.piece,
+          };
+        }
+
+        const clearingRows = placedBoard
+          .map((boardRow, index) => (boardRow.every(Boolean) ? index : -1))
+          .filter((index) => index >= 0);
+        const words = clearingRows.flatMap((rowIndex) => this.analyzeRow(placedBoard[rowIndex]));
+        const score = words.reduce((sum, word) => sum + word.score, 0);
+        const cleared = new Set(clearingRows);
+        const collapsedBoard = placedBoard.filter((_, index) => !cleared.has(index));
+        while (collapsedBoard.length < BOARD_HEIGHT) {
+          collapsedBoard.unshift(Array<StoredCell | null>(BOARD_WIDTH).fill(null));
+        }
+
+        placements.push({
+          board: collapsedBoard,
+          rotation,
+          row,
+          col,
+          score,
+          lines: clearingRows.length,
+          words,
+        });
+      }
+    }
+
+    return placements;
+  }
+
+  private evaluateBoard(board: Board): BoardEvaluation {
+    const heights: number[] = [];
+    let holes = 0;
+    let buriedDepth = 0;
+
+    for (let col = 0; col < BOARD_WIDTH; col += 1) {
+      let firstFilled = BOARD_HEIGHT;
+      let blocksAbove = 0;
+      for (let row = 0; row < BOARD_HEIGHT; row += 1) {
+        if (board[row][col]) {
+          if (firstFilled === BOARD_HEIGHT) firstFilled = row;
+          blocksAbove += 1;
+        } else if (firstFilled !== BOARD_HEIGHT) {
+          holes += 1;
+          buriedDepth += blocksAbove;
+        }
+      }
+      heights.push(BOARD_HEIGHT - firstFilled);
+    }
+
+    const aggregateHeight = heights.reduce((sum, height) => sum + height, 0);
+    const maximumHeight = Math.max(...heights);
+    const bumpiness = heights.slice(1).reduce(
+      (sum, height, index) => sum + Math.abs(height - heights[index]),
+      0,
+    );
+    let wells = 0;
+    for (let col = 0; col < BOARD_WIDTH; col += 1) {
+      const left = col === 0 ? BOARD_HEIGHT : heights[col - 1];
+      const right = col === BOARD_WIDTH - 1 ? BOARD_HEIGHT : heights[col + 1];
+      wells += Math.max(0, Math.min(left, right) - heights[col]);
+    }
+
+    let wordPotential = 0;
+    const wordCandidates: Array<{ text: string; value: number }> = [];
+    for (const row of board) {
+      const fullness = row.filter(Boolean).length / BOARD_WIDTH;
+      if (fullness < 0.2 || fullness === 1) continue;
+      for (const word of this.analyzeRow(row)) {
+        const value = word.score * (0.18 + 1.12 * fullness ** 4);
+        wordPotential += value;
+        wordCandidates.push({ text: word.text, value });
+      }
+    }
+
+    const setupWords = [...new Map(
+      wordCandidates
+        .sort((left, right) => right.value - left.value)
+        .map((candidate) => [candidate.text, candidate]),
+    ).values()].slice(0, 4).map((candidate) => candidate.text);
+
+    return {
+      value: wordPotential - holes * 285 - buriedDepth * 34 - aggregateHeight * 4.5 -
+        maximumHeight * maximumHeight * 1.7 - bumpiness * 8 - wells * 3,
+      setupWords,
+    };
+  }
+
+  findBestMove(depth = 3, beamWidth = 64): BotPlan | null {
+    if (!this.canControl() || !this.active) return null;
+    this.ensureQueues();
+
+    const searchDepth = Math.max(1, Math.min(5, Math.floor(depth)));
+    const width = Math.max(12, Math.min(160, Math.floor(beamWidth)));
+    const sequence: SearchPiece[] = [{
+      piece: this.active.piece,
+      letters: [...this.active.letters],
+    }];
+    for (let index = 0; index < searchDepth - 1; index += 1) {
+      sequence.push({
+        piece: this.pieceQueue[index],
+        letters: this.letterQueue[index].split(""),
+      });
+    }
+
+    let nodes = 0;
+    let reachedDepth = 1;
+    let frontier: SearchState[] = this.simulatePlacements(this.board, sequence[0]).map((placement) => {
+      nodes += 1;
+      const boardEvaluation = this.evaluateBoard(placement.board);
+      return {
+        board: placement.board,
+        score: placement.score,
+        lines: placement.lines,
+        root: placement,
+        value: placement.score * 1.25 - placement.lines * 90 + boardEvaluation.value,
+        setupWords: boardEvaluation.setupWords,
+      };
+    });
+    if (frontier.length === 0) return null;
+    frontier.sort((left, right) => right.value - left.value);
+    frontier = frontier.slice(0, width);
+    const finished: SearchState[] = [];
+
+    for (let ply = 1; ply < sequence.length && frontier.length > 0; ply += 1) {
+      const next: SearchState[] = [];
+      for (const state of frontier) {
+        if (this.lines + state.lines >= MAX_LINES) {
+          finished.push(state);
+          continue;
+        }
+        for (const placement of this.simulatePlacements(state.board, sequence[ply])) {
+          nodes += 1;
+          const score = state.score + placement.score;
+          const lines = state.lines + placement.lines;
+          const boardEvaluation = this.evaluateBoard(placement.board);
+          next.push({
+            board: placement.board,
+            score,
+            lines,
+            root: state.root,
+            value: score * 1.25 - lines * 90 + boardEvaluation.value,
+            setupWords: boardEvaluation.setupWords,
+          });
+        }
+      }
+      if (next.length === 0) break;
+      reachedDepth = ply + 1;
+      next.sort((left, right) => right.value - left.value);
+      frontier = next.slice(0, width);
+    }
+
+    const candidates = [...frontier, ...finished].sort((left, right) => right.value - left.value);
+    const best = candidates[0];
+    if (!best) return null;
+    const rootEvaluation = this.evaluateBoard(best.root.board);
+    const immediateWords = best.root.words.map((word) => word.text);
+    const setupWords = rootEvaluation.setupWords.length > 0 ? rootEvaluation.setupWords : best.setupWords;
+    const leftmostColumn = Math.min(...ROTATIONS[this.active.piece][best.root.rotation]
+      .map((block) => best.root.col + block.x)) + 1;
+    const placementText = `left edge column ${leftmostColumn}, ${best.root.rotation * 90}°`;
+    let reason = `Build from ${placementText} while keeping the surface open for the next ${reachedDepth - 1} piece${reachedDepth === 2 ? "" : "s"}.`;
+    if (immediateWords.length > 0) {
+      reason = `Bank ${immediateWords.join(" + ")} for ${best.root.score.toLocaleString()} points at ${placementText}.`;
+    } else if (setupWords.length > 0) {
+      reason = `Preserve ${setupWords.slice(0, 2).join(" / ")} as live scoring material from ${placementText}.`;
+    }
+
+    return {
+      piece: this.active.piece,
+      letters: [...this.active.letters],
+      rotation: best.root.rotation,
+      row: best.root.row,
+      col: best.root.col,
+      immediateScore: best.root.score,
+      immediateLines: best.root.lines,
+      immediateWords,
+      projectedScore: best.score,
+      projectedLines: best.lines,
+      setupWords,
+      depth: reachedDepth,
+      nodes,
+      evaluation: Math.round(best.value),
+      reason,
+    };
+  }
+
+  executeBotPlan(plan: BotPlan): boolean {
+    if (!this.canControl() || !this.active || this.active.piece !== plan.piece ||
+      this.active.letters.join("") !== plan.letters.join("")) return false;
+    const rotation = ((plan.rotation % 4) + 4) % 4;
+    if (this.collidesOnBoard(this.board, this.active, rotation, plan.row, plan.col) ||
+      !this.collidesOnBoard(this.board, this.active, rotation, plan.row + 1, plan.col)) return false;
+    this.active.rotation = rotation;
+    this.active.row = plan.row;
+    this.active.col = plan.col;
+    this.lockPiece();
+    return true;
   }
 
   private ghostRow(): number {
