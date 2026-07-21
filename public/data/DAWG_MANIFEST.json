@@ -1,0 +1,24 @@
+{
+  "format": "KWG Node22, DAWG-only",
+  "generator": "scripts/extract-dawg.mjs",
+  "lexica": {
+    "CSW24": {
+      "sourceCombinedKwgSha256": "62ca7a84f07429a9976f77a4f74b94911aca5d49cce050dce72dd0e032c0566f",
+      "dawgSha256": "34f7f84f1f99e9c44e8e97ece5f7aba76939d26c71b581dcf903c95627a9550d",
+      "wordSetSha256": "329cfb5bd9c20556448714d733fd437d4fcf04c68f9785c678b8bd90f1ae2a15",
+      "words": 299162,
+      "nodes": 204099,
+      "bytes": 816396,
+      "maximumWordLength": 21
+    },
+    "NWL23": {
+      "sourceCombinedKwgSha256": "3e74af981fdd974e107283f686da0fe4b7ec84ad0d825d444330c338c33b91ba",
+      "dawgSha256": "78d32ded10daa98483ae12b483c4db719b9ae2461ad941369006eaec61cf3a57",
+      "wordSetSha256": "892af9e950a55ad51534e37e1cfa76d9a55f539549d4d0c20b7d17a378e4eb43",
+      "words": 212868,
+      "nodes": 154375,
+      "bytes": 617500,
+      "maximumWordLength": 21
+    }
+  }
+}

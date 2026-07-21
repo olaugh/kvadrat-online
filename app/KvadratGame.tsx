@@ -128,19 +128,28 @@ export default function KvadratGameView() {
 
   useEffect(() => {
     let cancelled = false;
+    let loadedEngine: KvadratGame | null = null;
     loadGameAssets(lexicon)
       .then((assets) => {
-        if (cancelled) return;
+        if (cancelled) {
+          assets.strategy?.dispose();
+          return;
+        }
         const storedBest = window.localStorage.getItem(`kvadrat-best-score-${lexicon}`) ??
           (lexicon === "CSW24" ? window.localStorage.getItem("kvadrat-best-score") : null);
         setBestScore(Number(storedBest ?? 0));
-        engineRef.current = new KvadratGame(assets);
-        applySnapshot(engineRef.current.getSnapshot());
+        loadedEngine = new KvadratGame(assets);
+        engineRef.current = loadedEngine;
+        applySnapshot(loadedEngine.getSnapshot());
       })
       .catch((error: unknown) => {
         if (!cancelled) setLoadError(error instanceof Error ? error.message : "Game data failed to load.");
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      loadedEngine?.dispose();
+      if (engineRef.current === loadedEngine) engineRef.current = null;
+    };
   }, [applySnapshot, lexicon]);
 
   useEffect(() => {
@@ -493,7 +502,7 @@ export default function KvadratGameView() {
           <span><kbd>P</kbd> Pause</span>
           <span><kbd>R</kbd> Restart</span>
         </div>
-        <span className="build-label">SCORING BOT · DEPTH 4</span>
+        <span className="build-label">RUST · WASM BOT · DEPTH 4</span>
       </footer>
     </main>
   );

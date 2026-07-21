@@ -1,20 +1,32 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
 import test from "node:test";
 import { KvadratGame } from "../app/game-engine.ts";
 import type { LexiconId } from "../app/game-engine.ts";
+import { instantiateWasmStrategy } from "../app/strategy-wasm.ts";
 
-async function loadAssets(lexicon: LexiconId = "CSW24") {
+function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+async function loadAssets(lexicon: LexiconId = "CSW24", wasm = false) {
   const bagName = lexicon.toLowerCase();
-  const [kwgBuffer, bagsText] = await Promise.all([
+  const [kwgBuffer, bagsText, wasmBuffer] = await Promise.all([
     readFile(new URL(`../public/data/${lexicon}.kwg`, import.meta.url)),
     readFile(new URL(`../public/data/${bagName}-bags.txt`, import.meta.url), "utf8"),
+    wasm ? readFile(new URL("../public/wasm/kvadrat-strategy.wasm", import.meta.url)) : null,
   ]);
   const view = new DataView(kwgBuffer.buffer, kwgBuffer.byteOffset, kwgBuffer.byteLength);
   const kwg = new Uint32Array(kwgBuffer.byteLength / 4);
   for (let index = 0; index < kwg.length; index += 1) kwg[index] = view.getUint32(index * 4, true);
   const wordBags = bagsText.split(/\r?\n/).map((line) => line.trim().split(/\s+/).filter(Boolean)).filter((bag) => bag.length >= 28);
-  return { kwg, wordBags };
+  const strategy = wasmBuffer
+    ? await instantiateWasmStrategy(wasmBuffer, exactArrayBuffer(kwgBuffer))
+    : undefined;
+  return { kwg, wordBags, strategy };
 }
 
 function seededRandom(seed: number): () => number {
@@ -23,6 +35,12 @@ function seededRandom(seed: number): () => number {
     state = (state * 1_664_525 + 1_013_904_223) >>> 0;
     return state / 4_294_967_296;
   };
+}
+
+function settleClears(game: KvadratGame): void {
+  while (game.getSnapshot().phase === "clearing") {
+    for (let tick = 0; tick < 10; tick += 1) game.tick(50, false);
+  }
 }
 
 test("creates and advances a playable 40-line game", async () => {
@@ -60,6 +78,74 @@ test("supports the flagship CSW24 and NWL23 English lexica", async () => {
   assert.equal(nwlGame.isValidWord("NERF"), false);
   assert.equal(cswGame.isValidWord("ALF"), false);
   assert.equal(nwlGame.isValidWord("ALF"), false);
+});
+
+test("ships compact DAWG-only lexica", async () => {
+  const [csw, nwl, cswBytes, nwlBytes, manifestText] = await Promise.all([
+    stat(new URL("../public/data/CSW24.kwg", import.meta.url)),
+    stat(new URL("../public/data/NWL23.kwg", import.meta.url)),
+    readFile(new URL("../public/data/CSW24.kwg", import.meta.url)),
+    readFile(new URL("../public/data/NWL23.kwg", import.meta.url)),
+    readFile(new URL("../public/data/DAWG_MANIFEST.json", import.meta.url), "utf8"),
+  ]);
+  const manifest = JSON.parse(manifestText);
+  assert.ok(csw.size < 900_000, `CSW24 DAWG is unexpectedly large: ${csw.size}`);
+  assert.ok(nwl.size < 700_000, `NWL23 DAWG is unexpectedly large: ${nwl.size}`);
+  assert.equal(createHash("sha256").update(cswBytes).digest("hex"), manifest.lexica.CSW24.dawgSha256);
+  assert.equal(createHash("sha256").update(nwlBytes).digest("hex"), manifest.lexica.NWL23.dawgSha256);
+  assert.equal(manifest.lexica.CSW24.words, 299_162);
+  assert.equal(manifest.lexica.NWL23.words, 212_868);
+});
+
+test("ships the reproducible WASM strategy artifact", async () => {
+  const [wasm, manifestText] = await Promise.all([
+    readFile(new URL("../public/wasm/kvadrat-strategy.wasm", import.meta.url)),
+    readFile(new URL("../public/wasm/MANIFEST.json", import.meta.url), "utf8"),
+  ]);
+  const manifest = JSON.parse(manifestText);
+  assert.equal(WebAssembly.validate(wasm), true);
+  assert.equal(wasm.byteLength, manifest.bytes);
+  assert.equal(createHash("sha256").update(wasm).digest("hex"), manifest.sha256);
+});
+
+test("WASM word analysis and beam search match the TypeScript reference", async () => {
+  for (const [lexicon, seed] of [["CSW24", 7124], ["NWL23", 9823]] as const) {
+    const [referenceAssets, wasmAssets] = await Promise.all([
+      loadAssets(lexicon),
+      loadAssets(lexicon, true),
+    ]);
+    const reference = new KvadratGame(referenceAssets, seededRandom(seed));
+    const ported = new KvadratGame(wasmAssets, seededRandom(seed));
+    try {
+      for (const word of ["FAV", "HELLO", "QI", "ALF", "ZZZZZZ"]) {
+        assert.equal(ported.isValidWord(word), reference.isValidWord(word), `${lexicon}: ${word}`);
+      }
+      for (let step = 0; step < 9; step += 1) {
+        settleClears(reference);
+        settleClears(ported);
+        assert.equal(ported.getSnapshot().phase, reference.getSnapshot().phase);
+        if (reference.getSnapshot().phase !== "playing") break;
+        const depth = 2 + step % 3;
+        const width = depth === 2 ? 48 : depth === 3 ? 64 : 72;
+        const expected = reference.findBestMove(depth, width);
+        const actual = ported.findBestMove(depth, width);
+        assert.deepEqual(actual, expected, `${lexicon} parity failed at step ${step}, depth ${depth}`);
+        assert.ok(expected);
+        assert.equal(reference.executeBotPlan(expected), true);
+        assert.equal(ported.executeBotPlan(actual!), true);
+      }
+      settleClears(reference);
+      settleClears(ported);
+      const expected = reference.getSnapshot();
+      const actual = ported.getSnapshot();
+      assert.deepEqual(
+        { score: actual.score, lines: actual.lines, pieces: actual.pieces, words: actual.words, board: actual.board },
+        { score: expected.score, lines: expected.lines, pieces: expected.pieces, words: expected.words, board: expected.board },
+      );
+    } finally {
+      ported.dispose();
+    }
+  }
 });
 
 test("searches future pieces and executes a legal scoring plan", async () => {

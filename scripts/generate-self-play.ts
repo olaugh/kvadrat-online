@@ -2,6 +2,7 @@ import { appendFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/pr
 import { dirname, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import { KvadratGame } from "../app/game-engine.ts";
+import { instantiateWasmStrategy } from "../app/strategy-wasm.ts";
 import type {
   BotPlan,
   GameAssets,
@@ -129,9 +130,10 @@ function beamWidth(depth: number): number {
 
 async function loadAssets(lexicon: LexiconId): Promise<GameAssets> {
   const bagName = lexicon.toLowerCase();
-  const [kwgBuffer, bagsText] = await Promise.all([
+  const [kwgBuffer, bagsText, wasmBuffer] = await Promise.all([
     readFile(new URL(`../public/data/${lexicon}.kwg`, import.meta.url)),
     readFile(new URL(`../public/data/${bagName}-bags.txt`, import.meta.url), "utf8"),
+    readFile(new URL("../public/wasm/kvadrat-strategy.wasm", import.meta.url)),
   ]);
   const view = new DataView(kwgBuffer.buffer, kwgBuffer.byteOffset, kwgBuffer.byteLength);
   const kwg = new Uint32Array(kwgBuffer.byteLength / 4);
@@ -143,7 +145,10 @@ async function loadAssets(lexicon: LexiconId): Promise<GameAssets> {
     .map((line) => line.trim().split(/\s+/).filter(Boolean))
     .filter((bag) => bag.length >= 28)
     .map((bag) => bag.slice(0, 28));
-  return { kwg, wordBags };
+  const lexiconBytes = new Uint8Array(kwgBuffer.byteLength);
+  lexiconBytes.set(kwgBuffer);
+  const strategy = await instantiateWasmStrategy(wasmBuffer, lexiconBytes.buffer);
+  return { kwg, wordBags, strategy };
 }
 
 function delta(from: CurrentMetrics, to: CurrentMetrics) {

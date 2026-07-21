@@ -1,3 +1,5 @@
+import { loadWasmStrategy, type StrategySearchResult, type WasmStrategy } from "./strategy-wasm.ts";
+
 export const BOARD_WIDTH = 10;
 export const BOARD_HEIGHT = 22;
 export const VISIBLE_HEIGHT = 20;
@@ -125,6 +127,7 @@ export type TrainingPosition = {
 export type GameAssets = {
   kwg: Uint32Array;
   wordBags: string[][];
+  strategy?: WasmStrategy;
 };
 
 const BASE_BLOCKS: Record<PieceName, { size: number; blocks: Block[] }> = {
@@ -282,12 +285,14 @@ export async function loadGameAssets(lexicon: LexiconId = "CSW24"): Promise<Game
     .filter((bag) => bag.length >= 28)
     .map((bag) => bag.slice(0, 28));
 
-  return { kwg, wordBags };
+  const strategy = await loadWasmStrategy(kwgBuffer);
+  return { kwg, wordBags, strategy };
 }
 
 export class KvadratGame {
   private readonly kwg: Uint32Array;
   private readonly wordBags: string[][];
+  private readonly strategy?: WasmStrategy;
   private readonly random: () => number;
   private board: Board = emptyBoard();
   private pieceQueue: PieceName[] = [];
@@ -314,8 +319,13 @@ export class KvadratGame {
   constructor(assets: GameAssets, random: () => number = Math.random) {
     this.kwg = assets.kwg;
     this.wordBags = assets.wordBags;
+    this.strategy = assets.strategy;
     this.random = random;
     this.reset();
+  }
+
+  dispose(): void {
+    this.strategy?.dispose();
   }
 
   reset(): void {
@@ -528,6 +538,11 @@ export class KvadratGame {
   }
 
   private isWord(text: string): boolean {
+    if (this.strategy) return this.strategy.isWord(text);
+    return this.isWordReference(text);
+  }
+
+  private isWordReference(text: string): boolean {
     if (text.length < 2) return false;
     let nodeIndex = this.kwg[0] & KWG_ARC_MASK;
     let accepts = false;
@@ -552,6 +567,14 @@ export class KvadratGame {
   }
 
   private analyzeRow(row: Array<StoredCell | null>): WordSegment[] {
+    if (this.strategy) {
+      return this.strategy.analyzeRow(Uint8Array.from(row, (cell) => cell ?
+        (cell.letter.charCodeAt(0) - 64) | ((PIECE_NAMES.indexOf(cell.piece) + 1) << 5) : 0));
+    }
+    return this.analyzeRowReference(row);
+  }
+
+  private analyzeRowReference(row: Array<StoredCell | null>): WordSegment[] {
     const candidates = new Map<number, WordSegment[]>();
     for (let start = 0; start < BOARD_WIDTH; start += 1) {
       if (!row[start]) continue;
@@ -561,7 +584,7 @@ export class KvadratGame {
         const length = end - start + 1;
         if (length < 2 || !changedPiece) continue;
         const text = row.slice(start, end + 1).map((cell) => cell!.letter).join("");
-        if (!this.isWord(text)) continue;
+        if (!this.isWordReference(text)) continue;
         const score = scoreWord(text);
         if (score < MINIMUM_WORD_SCORE) continue;
         const segment = { start, end, text, score };
@@ -629,7 +652,8 @@ export class KvadratGame {
         const maxX = Math.max(...blocks.map((block) => block.x));
         const minY = Math.min(...blocks.map((block) => block.y));
 
-        for (let col = -minX; col < BOARD_WIDTH - maxX; col += 1) {
+        const firstCol = minX === 0 ? 0 : -minX;
+        for (let col = firstCol; col < BOARD_WIDTH - maxX; col += 1) {
           let row = -minY;
           if (this.collidesOnBoard(board, piece, rotation, row, col)) continue;
           while (!this.collidesOnBoard(board, piece, rotation, row + 1, col)) row += 1;
@@ -776,6 +800,47 @@ export class KvadratGame {
     };
   }
 
+  private encodeStrategyBoard(board: Board): Uint8Array {
+    return Uint8Array.from(board.flat(), (cell) => cell ?
+      (cell.letter.charCodeAt(0) - 64) | ((PIECE_NAMES.indexOf(cell.piece) + 1) << 5) : 0);
+  }
+
+  private botPlanFromStrategy(result: StrategySearchResult): BotPlan | null {
+    if (!this.active) return null;
+    const letters = shiftedLetters(this.active.letters, result.letterShift);
+    const leftmostColumn = Math.min(...ROTATIONS[this.active.piece][result.rotation]
+      .map((block) => result.col + block.x)) + 1;
+    const letterPrefix = result.letterShift === 0
+      ? ""
+      : `Cycle letters to ${letters.join("")}, then `;
+    const placementText = `left edge column ${leftmostColumn}, ${result.rotation * 90}°`;
+    let reason = `${letterPrefix}${letterPrefix ? "build" : "Build"} from ${placementText} while keeping the surface open for the next ${result.depth - 1} piece${result.depth === 2 ? "" : "s"}.`;
+    if (result.immediateWords.length > 0) {
+      reason = `${letterPrefix}${letterPrefix ? "bank" : "Bank"} ${result.immediateWords.join(" + ")} for ${result.immediateScore.toLocaleString()} points at ${placementText}.`;
+    } else if (result.setupWords.length > 0) {
+      reason = `${letterPrefix}${letterPrefix ? "preserve" : "Preserve"} ${result.setupWords.slice(0, 2).join(" / ")} as live scoring material from ${placementText}.`;
+    }
+    return {
+      piece: this.active.piece,
+      sourceLetters: [...this.active.letters],
+      letters,
+      letterShift: result.letterShift,
+      rotation: result.rotation,
+      row: result.row,
+      col: result.col,
+      immediateScore: result.immediateScore,
+      immediateLines: result.immediateLines,
+      immediateWords: result.immediateWords,
+      projectedScore: result.projectedScore,
+      projectedLines: result.projectedLines,
+      setupWords: result.setupWords,
+      depth: result.depth,
+      nodes: result.nodes,
+      evaluation: result.evaluation,
+      reason,
+    };
+  }
+
   findBestMove(depth = 3, beamWidth = 64): BotPlan | null {
     if (!this.canControl() || !this.active) return null;
     this.ensureQueues();
@@ -791,6 +856,20 @@ export class KvadratGame {
         piece: this.pieceQueue[index],
         letters: this.letterQueue[index].split(""),
       });
+    }
+
+    if (this.strategy) {
+      const result = this.strategy.findBestMove(
+        this.encodeStrategyBoard(this.board),
+        this.lines,
+        sequence.map((piece) => ({
+          piece: PIECE_NAMES.indexOf(piece.piece),
+          letters: piece.letters.join(""),
+        })),
+        searchDepth,
+        width,
+      );
+      return result ? this.botPlanFromStrategy(result) : null;
     }
 
     let nodes = 0;
