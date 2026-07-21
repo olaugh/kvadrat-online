@@ -1,5 +1,5 @@
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import { KvadratGame } from "../app/game-engine.ts";
 import type {
@@ -224,6 +224,7 @@ if (!Number.isFinite(options.shardRecords) || options.shardRecords < 100) {
   throw new Error("--shard-records must be at least 100.");
 }
 
+await mkdir(dirname(options.output), { recursive: true });
 await mkdir(options.output, { recursive: false });
 const startedAt = new Date();
 const deadline = startedAt.getTime() + options.hours * 60 * 60 * 1000;
