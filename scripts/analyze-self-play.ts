@@ -566,11 +566,12 @@ Split by episode seed, never by individual position.
 
 ## Recommended first model
 
-1. Encode the 22×10 letter plane and tetromino-color plane separately; condition on active/next pieces, lexicon, cleared lines, and search depth.
-2. Use a multi-task loss for 4/8/16-placement score and word returns plus terminal score-per-line. The shorter horizons provide denser supervision than the terminal label alone.
-3. Weight examples inversely by search depth and lexicon frequency if the final counts differ materially.
-4. Keep the episode-seed split above to prevent adjacent states from the same game leaking across train and evaluation.
-5. Treat this as on-policy bootstrapping data. After the first model is integrated, generate a second corpus with top-k exploration and compare candidate rankings on held-out episodes.
+1. Encode the 22×10 letter plane and tetromino-color plane separately; condition on active/next pieces, lexicon, current score, and remaining lines.
+2. Use 16-placement score, word, and line returns as the primary multi-task targets, with 4/8-placement returns and terminal score-per-line as auxiliary targets. This teaches near-term word-making potential without discarding long-run value.
+3. Do **not** feed policy depth to the deployable evaluator. Use depth only for stratified batches, sample weighting, and per-depth calibration checks so the model cannot identify the label-generating policy instead of evaluating the position.
+4. Prefer a robust loss such as Huber for score targets and normalize score by observed line return; keep separate word and line heads so a low-scoring line clear is distinguishable from no opportunity.
+5. Keep the episode-seed split above to prevent adjacent states from the same game leaking across train and evaluation.
+6. Treat this as on-policy bootstrapping data. After the first model is integrated, generate a second corpus with top-k exploration and compare candidate rankings on held-out episodes.
 
 ## Baseline correlations
 
