@@ -28,6 +28,8 @@ type Accumulator = {
 type GroupStats = {
   episodes: Set<string>;
   positions: number;
+  completedEpisodes: number;
+  topOutEpisodes: number;
   score: Accumulator;
   lines: Accumulator;
   words: Accumulator;
@@ -139,6 +141,8 @@ function groupStats(): GroupStats {
   return {
     episodes: new Set(),
     positions: 0,
+    completedEpisodes: 0,
+    topOutEpisodes: 0,
     score: accumulator(),
     lines: accumulator(),
     words: accumulator(),
@@ -147,11 +151,18 @@ function groupStats(): GroupStats {
 
 function addGroup(target: GroupStats, record: Record<string, unknown>): void {
   const episodeId = String(record.episodeId);
-  const labels = record.target as Record<string, number>;
+  const labels = record.target as {
+    terminalScore: number;
+    terminalLines: number;
+    wordsToGo: number;
+    completed: boolean;
+  };
   const isNewEpisode = !target.episodes.has(episodeId);
   target.episodes.add(episodeId);
   target.positions += 1;
   if (isNewEpisode) {
+    target.completedEpisodes += Number(labels.completed);
+    target.topOutEpisodes += Number(!labels.completed);
     addValue(target.score, labels.terminalScore);
     addValue(target.lines, labels.terminalLines);
     addValue(target.words, labels.wordsToGo + ((record.position as Record<string, Record<string, number>>).current.words));
@@ -162,6 +173,9 @@ function serializeGroup(target: GroupStats) {
   return {
     episodes: target.episodes.size,
     positions: target.positions,
+    completedEpisodes: target.completedEpisodes,
+    topOutEpisodes: target.topOutEpisodes,
+    completionRate: target.episodes.size ? target.completedEpisodes / target.episodes.size : 0,
     terminalScore: summarize(target.score),
     terminalLines: summarize(target.lines),
     terminalWords: summarize(target.words),
@@ -538,16 +552,16 @@ ${results.quality.valid ? "**PASS** — every finalized shard, record, episode s
 
 ## Policy and lexicon coverage
 
-| Group | Episodes | Positions | Mean terminal score |
-| --- | ---: | ---: | ---: |
-${Object.entries(results.byDepth).map(([key, value]) => `| Depth ${key} | ${rounded(value.episodes)} | ${rounded(value.positions)} | ${rounded(value.terminalScore.mean)} |`).join("\n")}
-${Object.entries(results.byLexicon).map(([key, value]) => `| ${key} | ${rounded(value.episodes)} | ${rounded(value.positions)} | ${rounded(value.terminalScore.mean)} |`).join("\n")}
+| Group | Episodes | Positions | Completion | Mean terminal score |
+| --- | ---: | ---: | ---: | ---: |
+${Object.entries(results.byDepth).map(([key, value]) => `| Depth ${key} | ${rounded(value.episodes)} | ${rounded(value.positions)} | ${percentage(value.completionRate)} | ${rounded(value.terminalScore.mean)} |`).join("\n")}
+${Object.entries(results.byLexicon).map(([key, value]) => `| ${key} | ${rounded(value.episodes)} | ${rounded(value.positions)} | ${percentage(value.completionRate)} | ${rounded(value.terminalScore.mean)} |`).join("\n")}
 
 ### Depth × lexicon interaction
 
-| Policy | Episodes | Positions | Mean terminal score |
-| --- | ---: | ---: | ---: |
-${Object.entries(results.byPolicyLexicon).map(([key, value]) => `| ${key.replace("-", " · ")} | ${rounded(value.episodes)} | ${rounded(value.positions)} | ${rounded(value.terminalScore.mean)} |`).join("\n")}
+| Policy | Episodes | Positions | Completion | Mean terminal score |
+| --- | ---: | ---: | ---: | ---: |
+${Object.entries(results.byPolicyLexicon).map(([key, value]) => `| ${key.replace("-", " · ")} | ${rounded(value.episodes)} | ${rounded(value.positions)} | ${percentage(value.completionRate)} | ${rounded(value.terminalScore.mean)} |`).join("\n")}
 
 ## Provenance
 
