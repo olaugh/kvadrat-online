@@ -60,6 +60,13 @@ and records raw boards, visible pieces, structural heuristics, chosen moves,
 4/8/16-placement returns, and terminal score-to-go labels. Generated corpora
 are written under `training-data/` and intentionally excluded from Git.
 
+After a run completes, validate every compressed shard and create a JSON plus
+Markdown quality report with:
+
+```bash
+npm run analyze-self-play -- --input training-data/your-run
+```
+
 ## Game data
 
 The web build ships CSW24 for World English and NWL23 for North American
