@@ -46,11 +46,32 @@ type StrategyExports = {
     outputPointer: number,
     outputCapacity: number,
   ): number;
+  kv_fragment_model_pair_new(
+    fullPointer: number,
+    fullLength: number,
+    contextPointer: number,
+    contextLength: number,
+  ): number;
+  kv_fragment_model_pair_free(handle: number): void;
+  kv_find_best_move_with_fragment_model(
+    lexiconPointer: number,
+    lexiconNodes: number,
+    modelHandle: number,
+    inputPointer: number,
+    inputLength: number,
+    outputPointer: number,
+    outputCapacity: number,
+  ): number;
+};
+
+export type FragmentModelBuffers = {
+  full: ArrayBuffer;
+  context: ArrayBuffer;
 };
 
 const BOARD_CELLS = 22 * 10;
 const WORD_CAPACITY = 32;
-const INPUT_CAPACITY = 256;
+const INPUT_CAPACITY = 320;
 const OUTPUT_CAPACITY = 1024;
 let browserModule: Promise<WebAssembly.Module> | null = null;
 
@@ -78,9 +99,16 @@ export class WasmStrategy {
   private readonly rowPointer: number;
   private readonly inputPointer: number;
   private readonly outputPointer: number;
+  private readonly lexiconId: 0 | 1;
+  private fragmentModelHandle = 0;
   private disposed = false;
 
-  constructor(instance: WebAssembly.Instance, lexiconBytes: ArrayBuffer) {
+  constructor(
+    instance: WebAssembly.Instance,
+    lexiconBytes: ArrayBuffer,
+    fragmentModels?: FragmentModelBuffers,
+    lexiconId: 0 | 1 = 0,
+  ) {
     this.exports = instance.exports as unknown as StrategyExports;
     if (!(this.exports.memory instanceof WebAssembly.Memory)) {
       throw new Error("Kvadrat strategy WASM did not export linear memory.");
@@ -92,7 +120,9 @@ export class WasmStrategy {
     this.rowPointer = this.allocate(10);
     this.inputPointer = this.allocate(INPUT_CAPACITY);
     this.outputPointer = this.allocate(OUTPUT_CAPACITY);
+    this.lexiconId = lexiconId;
     this.write(this.lexiconPointer, new Uint8Array(lexiconBytes));
+    if (fragmentModels) this.fragmentModelHandle = this.loadFragmentModels(fragmentModels);
   }
 
   private allocate(size: number): number {
@@ -107,6 +137,26 @@ export class WasmStrategy {
 
   private write(pointer: number, bytes: Uint8Array): void {
     this.memory(pointer, bytes.length).set(bytes);
+  }
+
+  private loadFragmentModels(models: FragmentModelBuffers): number {
+    const fullPointer = this.allocate(models.full.byteLength);
+    const contextPointer = this.allocate(models.context.byteLength);
+    try {
+      this.write(fullPointer, new Uint8Array(models.full));
+      this.write(contextPointer, new Uint8Array(models.context));
+      const handle = this.exports.kv_fragment_model_pair_new(
+        fullPointer,
+        models.full.byteLength,
+        contextPointer,
+        models.context.byteLength,
+      ) >>> 0;
+      if (!handle) throw new Error("Kvadrat strategy WASM rejected the fragment models.");
+      return handle;
+    } finally {
+      this.exports.kv_dealloc(fullPointer, models.full.byteLength);
+      this.exports.kv_dealloc(contextPointer, models.context.byteLength);
+    }
   }
 
   isWord(text: string): boolean {
@@ -156,23 +206,29 @@ export class WasmStrategy {
     sequence: StrategyPiece[],
     depth: number,
     beamWidth: number,
+    leafVisible: StrategyPiece[] = [],
   ): StrategySearchResult | null {
     if (board.length !== BOARD_CELLS) throw new Error(`Strategy boards must contain ${BOARD_CELLS} cells.`);
     const searchDepth = Math.max(1, Math.min(5, Math.floor(depth)));
     const width = Math.max(12, Math.min(160, Math.floor(beamWidth)));
     if (sequence.length < searchDepth) throw new Error("Strategy search sequence is shorter than its depth.");
 
-    const inputLength = 226 + searchDepth * 5;
+    const useFragmentModel = searchDepth === 3
+      && this.fragmentModelHandle !== 0
+      && leafVisible.length === 5;
+    const encodedPieces = useFragmentModel ? [...sequence.slice(0, searchDepth), ...leafVisible] : sequence;
+    const inputLength = 226 + encodedPieces.length * 5;
     const input = new Uint8Array(inputLength);
-    input[0] = 1;
+    input[0] = useFragmentModel ? 2 : 1;
     input[1] = searchDepth;
     input[2] = width;
     input[3] = Math.max(0, Math.min(255, Math.floor(currentLines)));
     input[4] = searchDepth;
+    input[5] = this.lexiconId;
     input.set(board, 6);
-    for (let index = 0; index < searchDepth; index += 1) {
+    for (let index = 0; index < encodedPieces.length; index += 1) {
       const offset = 226 + index * 5;
-      const piece = sequence[index];
+      const piece = encodedPieces[index];
       const letters = letterTiles(piece.letters);
       if (!letters || letters.length !== 4 || piece.piece < 0 || piece.piece > 6) {
         throw new Error("Strategy pieces require a valid tetromino index and four A–Z letters.");
@@ -182,14 +238,24 @@ export class WasmStrategy {
     }
     this.write(this.inputPointer, input);
 
-    const length = this.exports.kv_find_best_move(
-      this.lexiconPointer,
-      this.lexiconNodes,
-      this.inputPointer,
-      inputLength,
-      this.outputPointer,
-      OUTPUT_CAPACITY,
-    );
+    const length = useFragmentModel
+      ? this.exports.kv_find_best_move_with_fragment_model(
+          this.lexiconPointer,
+          this.lexiconNodes,
+          this.fragmentModelHandle,
+          this.inputPointer,
+          inputLength,
+          this.outputPointer,
+          OUTPUT_CAPACITY,
+        )
+      : this.exports.kv_find_best_move(
+          this.lexiconPointer,
+          this.lexiconNodes,
+          this.inputPointer,
+          inputLength,
+          this.outputPointer,
+          OUTPUT_CAPACITY,
+        );
     if (!length) return null;
     const bytes = this.memory(this.outputPointer, length);
     if (bytes[0] !== 1) throw new Error(`Unknown strategy result version ${bytes[0]}.`);
@@ -225,6 +291,10 @@ export class WasmStrategy {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.fragmentModelHandle) {
+      this.exports.kv_fragment_model_pair_free(this.fragmentModelHandle);
+      this.fragmentModelHandle = 0;
+    }
     this.exports.kv_dealloc(this.lexiconPointer, this.lexiconNodes * 4);
     this.exports.kv_dealloc(this.wordPointer, WORD_CAPACITY);
     this.exports.kv_dealloc(this.rowPointer, 10);
@@ -236,16 +306,21 @@ export class WasmStrategy {
 export async function instantiateWasmStrategy(
   wasmBytes: BufferSource,
   lexiconBytes: ArrayBuffer,
+  fragmentModels?: FragmentModelBuffers,
+  lexiconId: 0 | 1 = 0,
 ): Promise<WasmStrategy> {
   const source = await WebAssembly.instantiate(wasmBytes, {});
-  return new WasmStrategy(source.instance, lexiconBytes);
+  return new WasmStrategy(source.instance, lexiconBytes, fragmentModels, lexiconId);
 }
 
-export async function loadWasmStrategy(lexiconBytes: ArrayBuffer): Promise<WasmStrategy> {
+export async function loadWasmStrategy(
+  lexiconBytes: ArrayBuffer,
+  lexiconId: 0 | 1 = 0,
+): Promise<WasmStrategy> {
   browserModule ??= fetch("/wasm/kvadrat-strategy.wasm").then(async (response) => {
     if (!response.ok) throw new Error("Could not load the Kvadrat strategy engine.");
     return WebAssembly.compile(await response.arrayBuffer());
   });
   const instance = await WebAssembly.instantiate(await browserModule, {});
-  return new WasmStrategy(instance, lexiconBytes);
+  return new WasmStrategy(instance, lexiconBytes, undefined, lexiconId);
 }

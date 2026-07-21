@@ -1,7 +1,8 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use flate2::{Compression, write::GzEncoder};
 use kvadrat_strategy::native::{
-    BoardEvaluation, HEIGHT, PackedBoard, Piece, SearchOutcome, Strategy, WIDTH,
+    BoardEvaluation, FragmentModelPair, FragmentRerank, HEIGHT, PackedBoard, Piece, SearchOutcome,
+    Strategy, WIDTH,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -34,11 +35,16 @@ struct Options {
     shard_records: usize,
     depths: Vec<usize>,
     threads: usize,
+    fragment_full: Option<PathBuf>,
+    fragment_context: Option<PathBuf>,
+    fragment_weight: f64,
+    fragment_candidates: usize,
 }
 
 #[derive(Clone)]
 struct LexiconAssets {
     name: &'static str,
+    id: u8,
     strategy: Arc<Strategy>,
     word_bags: Arc<Vec<Vec<[u8; 4]>>>,
 }
@@ -46,6 +52,7 @@ struct LexiconAssets {
 struct Assets {
     csw24: LexiconAssets,
     nwl23: LexiconAssets,
+    fragment_model: Option<Arc<FragmentModelPair>>,
 }
 
 impl Assets {
@@ -354,6 +361,17 @@ impl GameState {
         sequence
     }
 
+    fn leaf_visible(&mut self, assets: &LexiconAssets, depth: usize) -> Vec<Piece> {
+        self.ensure_queues(assets);
+        self.piece_queue
+            .iter()
+            .zip(self.letter_queue.iter())
+            .skip(depth.saturating_sub(1))
+            .take(5)
+            .map(|(&kind, &letters)| Piece { kind, letters })
+            .collect()
+    }
+
     fn position(&mut self, assets: &LexiconAssets) -> Result<Position> {
         self.ensure_queues(assets);
         let active = self
@@ -460,6 +478,40 @@ fn parse_options(root: &Path) -> Result<Options> {
             }
         },
     );
+    let optional_path = |name: &str| -> Result<Option<PathBuf>> {
+        values
+            .get(name)
+            .map(|value| {
+                let path = PathBuf::from(value);
+                Ok(if path.is_absolute() {
+                    path
+                } else {
+                    env::current_dir()?.join(path)
+                })
+            })
+            .transpose()
+    };
+    let fragment_full = optional_path("fragment-full")?;
+    let fragment_context = optional_path("fragment-context")?;
+    if fragment_full.is_some() != fragment_context.is_some() {
+        return Err("--fragment-full and --fragment-context must be supplied together".into());
+    }
+    let fragment_weight = values
+        .get("fragment-weight")
+        .map(String::as_str)
+        .unwrap_or("1")
+        .parse()?;
+    if !matches!(fragment_weight, value if f64::is_finite(value) && value >= 0.0) {
+        return Err("--fragment-weight must be finite and nonnegative".into());
+    }
+    let fragment_candidates = values
+        .get("fragment-candidates")
+        .map(String::as_str)
+        .unwrap_or("12")
+        .parse()?;
+    if !(1..=160).contains(&fragment_candidates) {
+        return Err("--fragment-candidates must be from 1 through 160".into());
+    }
     Ok(Options {
         hours,
         max_games: values
@@ -476,17 +528,33 @@ fn parse_options(root: &Path) -> Result<Options> {
         shard_records,
         depths,
         threads,
+        fragment_full,
+        fragment_context,
+        fragment_weight,
+        fragment_candidates,
     })
 }
 
-fn load_assets(root: &Path) -> Result<Assets> {
+fn load_assets(root: &Path, options: &Options) -> Result<Assets> {
+    let fragment_model = options
+        .fragment_full
+        .as_ref()
+        .zip(options.fragment_context.as_ref())
+        .map(|(full, context)| -> Result<Arc<FragmentModelPair>> {
+            Ok(Arc::new(FragmentModelPair::from_bytes(
+                &fs::read(full)?,
+                &fs::read(context)?,
+            )?))
+        })
+        .transpose()?;
     Ok(Assets {
-        csw24: load_lexicon(root, "CSW24")?,
-        nwl23: load_lexicon(root, "NWL23")?,
+        csw24: load_lexicon(root, "CSW24", 0)?,
+        nwl23: load_lexicon(root, "NWL23", 1)?,
+        fragment_model,
     })
 }
 
-fn load_lexicon(root: &Path, name: &'static str) -> Result<LexiconAssets> {
+fn load_lexicon(root: &Path, name: &'static str, id: u8) -> Result<LexiconAssets> {
     let data = root.join("public/data");
     let kwg = fs::read(data.join(format!("{name}.kwg")))?;
     let bags = fs::read_to_string(data.join(format!("{}-bags.txt", name.to_lowercase())))?;
@@ -505,6 +573,7 @@ fn load_lexicon(root: &Path, name: &'static str) -> Result<LexiconAssets> {
     }
     Ok(LexiconAssets {
         name,
+        id,
         strategy: Arc::new(Strategy::from_kwg_bytes(&kwg)?),
         word_bags: Arc::new(word_bags),
     })
@@ -669,6 +738,7 @@ fn run_game(
     started_at: &str,
     options: &Options,
     assets: &LexiconAssets,
+    fragment_model: Option<&FragmentModelPair>,
 ) -> Result<EpisodeResult> {
     let depth = options.depths[game_index as usize % options.depths.len()];
     let width = beam_width(depth);
@@ -683,11 +753,27 @@ fn run_game(
         let active = game.active.ok_or("playing game lacks an active piece")?;
         let position = game.position(assets)?;
         let sequence = game.sequence(assets, depth);
-        let Some(outcome) =
+        let outcome = if let Some(model) = fragment_model {
+            let leaf_visible = game.leaf_visible(assets, depth);
+            assets.strategy.find_best_move_with_fragment_model(
+                &game.board,
+                game.current.lines as u8,
+                &sequence,
+                width,
+                FragmentRerank {
+                    leaf_visible: &leaf_visible,
+                    model,
+                    lexicon: assets.id,
+                    weight: options.fragment_weight,
+                    candidates: options.fragment_candidates,
+                },
+            )
+        } else {
             assets
                 .strategy
                 .find_best_move(&game.board, game.current.lines as u8, &sequence, width)
-        else {
+        };
+        let Some(outcome) = outcome else {
             game.phase = "over";
             game.active = None;
             break;
@@ -912,6 +998,10 @@ impl<'a> CorpusWriter<'a> {
                 "shardRecords": self.options.shard_records,
                 "depths": self.options.depths,
                 "threads": self.options.threads,
+                "fragmentFull": self.options.fragment_full,
+                "fragmentContext": self.options.fragment_context,
+                "fragmentWeight": self.options.fragment_weight,
+                "fragmentCandidates": self.options.fragment_candidates,
             },
             "aggregate": self.aggregate,
             "byDepth": self.by_depth,
@@ -1010,6 +1100,25 @@ fn write_provenance(
     let generator = root.join("wasm-strategy/src/bin/kvadrat-self-play.rs");
     let executable = env::current_exe()?;
     let data = root.join("public/data");
+    let fragment_model = options
+        .fragment_full
+        .as_ref()
+        .zip(options.fragment_context.as_ref())
+        .map(|(full, context)| -> Result<Value> {
+            Ok(json!({
+                "full": {
+                    "path": full,
+                    "sha256": sha256_file(full)?,
+                },
+                "context": {
+                    "path": context,
+                    "sha256": sha256_file(context)?,
+                },
+                "weight": options.fragment_weight,
+                "candidates": options.fragment_candidates,
+            }))
+        })
+        .transpose()?;
     let provenance = json!({
         "schemaVersion": 1,
         "run": {
@@ -1035,6 +1144,7 @@ fn write_provenance(
                 "kwgSha256": sha256_file(&data.join("NWL23.kwg"))?,
                 "bagsSha256": sha256_file(&data.join("nwl23-bags.txt"))?,
             },
+            "fragmentModel": fragment_model,
         },
     });
     let mut file = File::create(output.join("PROVENANCE.json"))?;
@@ -1057,7 +1167,7 @@ fn run() -> Result<()> {
     let deadline = started_at + chrono::Duration::from_std(duration)?;
     let deadline_instant = Instant::now() + duration;
     let started_at_text = rfc3339(started_at);
-    let assets = Arc::new(load_assets(&root)?);
+    let assets = Arc::new(load_assets(&root, &options)?);
     write_schema(&options.output)?;
     write_provenance(&root, &options.output, &options, started_at, deadline)?;
     let mut writer = CorpusWriter::new(&options, started_at, deadline);
@@ -1087,7 +1197,13 @@ fn run() -> Result<()> {
                     break;
                 }
                 let lexicon = assets.for_game(game_index);
-                let result = run_game(game_index, &started_at, &options, lexicon);
+                let result = run_game(
+                    game_index,
+                    &started_at,
+                    &options,
+                    lexicon,
+                    assets.fragment_model.as_deref(),
+                );
                 let failed = result.is_err();
                 if sender.send(WorkerMessage { game_index, result }).is_err() {
                     break;

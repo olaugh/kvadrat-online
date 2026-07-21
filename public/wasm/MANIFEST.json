@@ -2,6 +2,6 @@
   "abiVersion": 1,
   "target": "wasm32-unknown-unknown",
   "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
-  "bytes": 46954,
-  "sha256": "937c42ef7530f3b15ae8b898f744ecad9cb87bb9cb870d687eacceffd7a02bc9"
+  "bytes": 64298,
+  "sha256": "b3cf0dae484351956797df165eb40b8ce958f59304028c45efb45e3909a1aa99"
 }

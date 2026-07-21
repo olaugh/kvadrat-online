@@ -2,6 +2,14 @@ use std::alloc::{Layout, alloc, dealloc};
 use std::cmp::Ordering;
 use std::slice;
 
+mod fragment_model;
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static FRAGMENT_MODELS: std::cell::RefCell<Vec<Option<fragment_model::FragmentModelPair>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 const BOARD_WIDTH: usize = 10;
 const BOARD_HEIGHT: usize = 22;
 const BOARD_CELLS: usize = BOARD_WIDTH * BOARD_HEIGHT;
@@ -377,6 +385,8 @@ struct SearchResult {
     evaluation: i32,
 }
 
+type LeafReranker<'a> = &'a dyn Fn(&Board, u16) -> f64;
+
 fn cell_letter(cell: u8) -> u8 {
     cell & 0x1f
 }
@@ -711,6 +721,8 @@ fn search(
     current_lines: u8,
     sequence: &[SearchPiece],
     beam_width: usize,
+    leaf_reranker: Option<LeafReranker<'_>>,
+    leaf_rerank_candidates: usize,
 ) -> Option<SearchResult> {
     let root_placements = simulate_placements(lexicon, &board, sequence[0]);
     if root_placements.is_empty() {
@@ -770,6 +782,13 @@ fn search(
 
     frontier.extend(finished);
     frontier.sort_by(compare_states);
+    if let Some(rerank) = leaf_reranker {
+        frontier.truncate(leaf_rerank_candidates.clamp(1, beam_width));
+        for state in &mut frontier {
+            state.value += rerank(&state.board, state.lines);
+        }
+        frontier.sort_by(compare_states);
+    }
     let best = *frontier.first()?;
     let root = root_placements[best.root_index as usize];
     let root_evaluation = evaluate_board(lexicon, &root.board);
@@ -793,6 +812,8 @@ fn search(
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native {
     use super::*;
+
+    pub use crate::fragment_model::{FragmentModelPair, FragmentPrediction, FragmentResidual};
 
     pub const WIDTH: usize = BOARD_WIDTH;
     pub const HEIGHT: usize = BOARD_HEIGHT;
@@ -845,6 +866,14 @@ pub mod native {
         pub evaluation: i32,
     }
 
+    pub struct FragmentRerank<'a> {
+        pub leaf_visible: &'a [Piece],
+        pub model: &'a FragmentModelPair,
+        pub lexicon: u8,
+        pub weight: f64,
+        pub candidates: usize,
+    }
+
     pub struct Strategy {
         lexicon: Vec<u32>,
     }
@@ -871,6 +900,43 @@ pub mod native {
 
     fn texts_to_vec(texts: &TextList) -> Vec<String> {
         texts.as_slice().iter().map(text_to_string).collect()
+    }
+
+    fn result_to_outcome(result: SearchResult) -> SearchOutcome {
+        SearchOutcome {
+            board: result.root.board,
+            letter_shift: result.root.letter_shift,
+            rotation: result.root.rotation,
+            row: result.root.row,
+            col: result.root.col,
+            immediate_score: result.root.score,
+            immediate_lines: result.root.lines,
+            immediate_words: words_to_vec(&result.immediate_words),
+            projected_score: result.projected_score,
+            projected_lines: result.projected_lines,
+            setup_words: texts_to_vec(&result.setup_words),
+            depth: result.depth,
+            nodes: result.nodes,
+            evaluation: result.evaluation,
+        }
+    }
+
+    fn valid_sequence(sequence: &[Piece]) -> bool {
+        !sequence.is_empty()
+            && sequence.len() <= 5
+            && sequence.iter().all(|piece| {
+                piece.kind < 7 && piece.letters.iter().all(|letter| (1..=26).contains(letter))
+            })
+    }
+
+    fn to_search_pieces(sequence: &[Piece]) -> Vec<SearchPiece> {
+        sequence
+            .iter()
+            .map(|piece| SearchPiece {
+                piece: piece.kind,
+                letters: piece.letters,
+            })
+            .collect()
     }
 
     impl Strategy {
@@ -921,49 +987,60 @@ pub mod native {
             sequence: &[Piece],
             beam_width: usize,
         ) -> Option<SearchOutcome> {
-            if sequence.is_empty()
-                || sequence.len() > 5
-                || board.iter().any(|&cell| !valid_cell(cell))
-                || sequence.iter().any(|piece| {
-                    piece.kind >= 7
-                        || piece
-                            .letters
-                            .iter()
-                            .any(|letter| !(1..=26).contains(letter))
-                })
-            {
+            if board.iter().any(|&cell| !valid_cell(cell)) || !valid_sequence(sequence) {
                 return None;
             }
-            let search_pieces: Vec<SearchPiece> = sequence
-                .iter()
-                .map(|piece| SearchPiece {
-                    piece: piece.kind,
-                    letters: piece.letters,
-                })
-                .collect();
+            let search_pieces = to_search_pieces(sequence);
             let result = search(
                 &self.lexicon,
                 *board,
                 current_lines,
                 &search_pieces,
                 beam_width.clamp(12, 160),
+                None,
+                0,
             )?;
-            Some(SearchOutcome {
-                board: result.root.board,
-                letter_shift: result.root.letter_shift,
-                rotation: result.root.rotation,
-                row: result.root.row,
-                col: result.root.col,
-                immediate_score: result.root.score,
-                immediate_lines: result.root.lines,
-                immediate_words: words_to_vec(&result.immediate_words),
-                projected_score: result.projected_score,
-                projected_lines: result.projected_lines,
-                setup_words: texts_to_vec(&result.setup_words),
-                depth: result.depth,
-                nodes: result.nodes,
-                evaluation: result.evaluation,
-            })
+            Some(result_to_outcome(result))
+        }
+
+        pub fn find_best_move_with_fragment_model(
+            &self,
+            board: &PackedBoard,
+            current_lines: u8,
+            sequence: &[Piece],
+            beam_width: usize,
+            reranker: FragmentRerank<'_>,
+        ) -> Option<SearchOutcome> {
+            if board.iter().any(|&cell| !valid_cell(cell))
+                || !valid_sequence(sequence)
+                || reranker.leaf_visible.len() != 5
+                || !valid_sequence(reranker.leaf_visible)
+                || reranker.lexicon > 1
+                || !reranker.weight.is_finite()
+            {
+                return None;
+            }
+            let search_pieces = to_search_pieces(sequence);
+            let leaf_pieces = to_search_pieces(reranker.leaf_visible);
+            let rerank = |leaf_board: &Board, projected_lines: u16| {
+                let leaf_lines =
+                    (u16::from(current_lines) + projected_lines).min(u16::from(u8::MAX)) as u8;
+                reranker
+                    .model
+                    .residual(leaf_board, &leaf_pieces, leaf_lines, reranker.lexicon)
+                    .value()
+                    * reranker.weight
+            };
+            let result = search(
+                &self.lexicon,
+                *board,
+                current_lines,
+                &search_pieces,
+                beam_width.clamp(12, 160),
+                Some(&rerank),
+                reranker.candidates,
+            )?;
+            Some(result_to_outcome(result))
         }
     }
 }
@@ -1037,6 +1114,36 @@ fn output_from_raw<'a>(pointer: u32, capacity: u32) -> Option<&'a mut [u8]> {
         return None;
     }
     Some(unsafe { slice::from_raw_parts_mut(pointer as *mut u8, capacity as usize) })
+}
+
+fn write_search_result(result: &SearchResult, output: &mut [u8]) -> u32 {
+    let mut writer = Writer::new(output);
+    writer.u8(1);
+    writer.u8(result.root.letter_shift);
+    writer.u8(result.root.rotation);
+    writer.i8(result.root.row);
+    writer.i8(result.root.col);
+    writer.u8(result.root.lines);
+    writer.u8(result.depth);
+    writer.u8(result.immediate_words.len);
+    writer.u8(result.setup_words.len);
+    writer.u8(0);
+    writer.i32(result.root.score);
+    writer.i32(result.projected_score);
+    writer.u16(result.projected_lines);
+    writer.u32(result.nodes);
+    writer.i32(result.evaluation);
+    for word in result.immediate_words.as_slice() {
+        writer.text(&word.text);
+    }
+    for text in result.setup_words.as_slice() {
+        writer.text(text);
+    }
+    if writer.failed {
+        0
+    } else {
+        writer.position as u32
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1161,37 +1268,149 @@ pub extern "C" fn kv_find_best_move(
         sequence.push(SearchPiece { piece, letters });
     }
 
-    let Some(result) = search(lexicon, board, current_lines, &sequence, beam_width) else {
+    let Some(result) = search(
+        lexicon,
+        board,
+        current_lines,
+        &sequence,
+        beam_width,
+        None,
+        0,
+    ) else {
         return 0;
     };
     let Some(output) = output_from_raw(output_pointer, output_capacity) else {
         return 0;
     };
-    let mut writer = Writer::new(output);
-    writer.u8(1);
-    writer.u8(result.root.letter_shift);
-    writer.u8(result.root.rotation);
-    writer.i8(result.root.row);
-    writer.i8(result.root.col);
-    writer.u8(result.root.lines);
-    writer.u8(result.depth);
-    writer.u8(result.immediate_words.len);
-    writer.u8(result.setup_words.len);
-    writer.u8(0);
-    writer.i32(result.root.score);
-    writer.i32(result.projected_score);
-    writer.u16(result.projected_lines);
-    writer.u32(result.nodes);
-    writer.i32(result.evaluation);
-    for word in result.immediate_words.as_slice() {
-        writer.text(&word.text);
+    write_search_result(&result, output)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn kv_fragment_model_pair_new(
+    full_pointer: u32,
+    full_length: u32,
+    context_pointer: u32,
+    context_length: u32,
+) -> u32 {
+    let Some(full) = bytes_from_raw(full_pointer, full_length) else {
+        return 0;
+    };
+    let Some(context) = bytes_from_raw(context_pointer, context_length) else {
+        return 0;
+    };
+    let Ok(model) = fragment_model::FragmentModelPair::from_bytes(full, context) else {
+        return 0;
+    };
+    FRAGMENT_MODELS.with(|models| {
+        let mut models = models.borrow_mut();
+        if let Some(index) = models.iter().position(Option::is_none) {
+            models[index] = Some(model);
+            (index + 1) as u32
+        } else {
+            models.push(Some(model));
+            models.len() as u32
+        }
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn kv_fragment_model_pair_free(handle: u32) {
+    let Some(index) = handle.checked_sub(1).map(|value| value as usize) else {
+        return;
+    };
+    FRAGMENT_MODELS.with(|models| {
+        if let Some(model) = models.borrow_mut().get_mut(index) {
+            *model = None;
+        }
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn kv_find_best_move_with_fragment_model(
+    lexicon_pointer: u32,
+    lexicon_nodes: u32,
+    model_handle: u32,
+    input_pointer: u32,
+    input_length: u32,
+    output_pointer: u32,
+    output_capacity: u32,
+) -> u32 {
+    const DEPTH: usize = 3;
+    const LEAF_VISIBLE: usize = 5;
+    const FRAGMENT_WEIGHT: f64 = 0.25;
+    const FRAGMENT_CANDIDATES: usize = 6;
+
+    let Some(lexicon) = lexicon_from_raw(lexicon_pointer, lexicon_nodes) else {
+        return 0;
+    };
+    let Some(model_index) = model_handle.checked_sub(1).map(|value| value as usize) else {
+        return 0;
+    };
+    let Some(input) = bytes_from_raw(input_pointer, input_length) else {
+        return 0;
+    };
+    if input.len() < 226 + (DEPTH + LEAF_VISIBLE) * 5
+        || input[0] != 2
+        || input[1] as usize != DEPTH
+        || input[4] as usize != DEPTH
+        || input[5] > 1
+    {
+        return 0;
     }
-    for text in result.setup_words.as_slice() {
-        writer.text(text);
+    let beam_width = input[2].clamp(12, 160) as usize;
+    let current_lines = input[3];
+    let lexicon_id = input[5];
+    let mut board = [0u8; BOARD_CELLS];
+    board.copy_from_slice(&input[6..226]);
+    if board.iter().any(|&cell| !valid_cell(cell)) {
+        return 0;
     }
-    if writer.failed {
-        0
-    } else {
-        writer.position as u32
+
+    let mut pieces = Vec::with_capacity(DEPTH + LEAF_VISIBLE);
+    for index in 0..DEPTH + LEAF_VISIBLE {
+        let offset = 226 + index * 5;
+        let piece = input[offset];
+        if piece >= 7 {
+            return 0;
+        }
+        let mut letters = [0u8; 4];
+        letters.copy_from_slice(&input[offset + 1..offset + 5]);
+        if letters.iter().any(|&letter| !(1..=26).contains(&letter)) {
+            return 0;
+        }
+        pieces.push(SearchPiece { piece, letters });
     }
+    let (sequence, leaf_visible) = pieces.split_at(DEPTH);
+    FRAGMENT_MODELS.with(|models| {
+        let models = models.borrow();
+        let Some(model) = models.get(model_index).and_then(Option::as_ref) else {
+            return 0;
+        };
+        let rerank = |leaf_board: &Board, projected_lines: u16| {
+            let leaf_lines =
+                (u16::from(current_lines) + projected_lines).min(u16::from(u8::MAX)) as u8;
+            model
+                .residual(leaf_board, leaf_visible, leaf_lines, lexicon_id)
+                .value()
+                * FRAGMENT_WEIGHT
+        };
+        let Some(result) = search(
+            lexicon,
+            board,
+            current_lines,
+            sequence,
+            beam_width,
+            Some(&rerank),
+            FRAGMENT_CANDIDATES,
+        ) else {
+            return 0;
+        };
+        let Some(output) = output_from_raw(output_pointer, output_capacity) else {
+            return 0;
+        };
+        write_search_result(&result, output)
+    })
 }

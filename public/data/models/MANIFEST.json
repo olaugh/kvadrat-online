@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "format": "KVFM1",
+  "deploymentStatus": "experimental-rejected",
+  "models": {
+    "full": {
+      "file": "fragment-full-v4.kfm",
+      "bytes": 62208,
+      "parameters": 15544,
+      "sha256": "c77b51282e457fe277d6dd36bd7ce9a1dd966b6978f791ddbd97a0f5d62f2089"
+    },
+    "maskedContext": {
+      "file": "fragment-context-v4.kfm",
+      "bytes": 62208,
+      "parameters": 15544,
+      "sha256": "b7a097fc4e142a035e7854c99d5e5a82344b31575bee876c899bcf1ada9d4ab7"
+    }
+  },
+  "training": {
+    "sourceGames": 70201,
+    "sourcePositions": 7398300,
+    "trainPositions": 5923862,
+    "validationPositions": 745734,
+    "testPositions": 728704,
+    "testLexica": {
+      "CSW24": 353976,
+      "NWL23": 374728
+    },
+    "epochs": 3,
+    "device": "cpu",
+    "split": "episode seed hashed before 80/10/10 assignment"
+  },
+  "heldOutPrediction": {
+    "positions": 728704,
+    "fullScore8Correlation": 0.5453282549592081,
+    "maskedContextScore8Correlation": 0.5175770663159223,
+    "fullScorePerLine8Correlation": 0.3719842735006123,
+    "maskedContextScorePerLine8Correlation": 0.31981106043843077
+  },
+  "pairedPolicyEvaluation": {
+    "seed": 3512640997,
+    "seedDisjointFromTraining": true,
+    "games": 400,
+    "depth": 3,
+    "beamWidth": 64,
+    "rerankCandidates": 6,
+    "residualWeight": 0.25,
+    "baselineMeanScore": 10520.4925,
+    "candidateMeanScore": 10480.955,
+    "meanScoreDelta": -39.5375,
+    "relativeScoreDelta": -0.003758141550882718,
+    "scoreDeltaCi95": [-146.25870185712387, 67.18370185712385],
+    "baselineCompleted": 400,
+    "candidateCompleted": 397,
+    "decision": "Rejected for autoplay; retain the depth-four heuristic baseline."
+  }
+}

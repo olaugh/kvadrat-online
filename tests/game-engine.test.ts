@@ -12,19 +12,29 @@ function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return copy.buffer;
 }
 
-async function loadAssets(lexicon: LexiconId = "CSW24", wasm = false) {
+async function loadAssets(lexicon: LexiconId = "CSW24", wasm = false, fragments = false) {
   const bagName = lexicon.toLowerCase();
-  const [kwgBuffer, bagsText, wasmBuffer] = await Promise.all([
+  const [kwgBuffer, bagsText, wasmBuffer, fragmentFull, fragmentContext] = await Promise.all([
     readFile(new URL(`../public/data/${lexicon}.kwg`, import.meta.url)),
     readFile(new URL(`../public/data/${bagName}-bags.txt`, import.meta.url), "utf8"),
     wasm ? readFile(new URL("../public/wasm/kvadrat-strategy.wasm", import.meta.url)) : null,
+    fragments ? readFile(new URL("../public/data/models/fragment-full-v4.kfm", import.meta.url)) : null,
+    fragments ? readFile(new URL("../public/data/models/fragment-context-v4.kfm", import.meta.url)) : null,
   ]);
   const view = new DataView(kwgBuffer.buffer, kwgBuffer.byteOffset, kwgBuffer.byteLength);
   const kwg = new Uint32Array(kwgBuffer.byteLength / 4);
   for (let index = 0; index < kwg.length; index += 1) kwg[index] = view.getUint32(index * 4, true);
   const wordBags = bagsText.split(/\r?\n/).map((line) => line.trim().split(/\s+/).filter(Boolean)).filter((bag) => bag.length >= 28);
   const strategy = wasmBuffer
-    ? await instantiateWasmStrategy(wasmBuffer, exactArrayBuffer(kwgBuffer))
+    ? await instantiateWasmStrategy(
+        wasmBuffer,
+        exactArrayBuffer(kwgBuffer),
+        fragmentFull && fragmentContext ? {
+          full: exactArrayBuffer(fragmentFull),
+          context: exactArrayBuffer(fragmentContext),
+        } : undefined,
+        lexicon === "NWL23" ? 1 : 0,
+      )
     : undefined;
   return { kwg, wordBags, strategy };
 }
@@ -108,6 +118,19 @@ test("ships the reproducible WASM strategy artifact", async () => {
   assert.equal(createHash("sha256").update(wasm).digest("hex"), manifest.sha256);
 });
 
+test("ships hashed experimental fragment models with their rejected evaluation", async () => {
+  const root = new URL("../public/data/models/", import.meta.url);
+  const manifest = JSON.parse(await readFile(new URL("MANIFEST.json", root), "utf8"));
+  assert.equal(manifest.deploymentStatus, "experimental-rejected");
+  assert.equal(manifest.pairedPolicyEvaluation.seedDisjointFromTraining, true);
+  assert.ok(manifest.pairedPolicyEvaluation.meanScoreDelta < 0);
+  for (const model of Object.values(manifest.models) as Array<{ file: string; bytes: number; sha256: string }>) {
+    const bytes = await readFile(new URL(model.file, root));
+    assert.equal(bytes.byteLength, model.bytes);
+    assert.equal(createHash("sha256").update(bytes).digest("hex"), model.sha256);
+  }
+});
+
 test("WASM word analysis and beam search match the TypeScript reference", async () => {
   for (const [lexicon, seed] of [["CSW24", 7124], ["NWL23", 9823]] as const) {
     const [referenceAssets, wasmAssets] = await Promise.all([
@@ -144,6 +167,21 @@ test("WASM word analysis and beam search match the TypeScript reference", async 
       );
     } finally {
       ported.dispose();
+    }
+  }
+});
+
+test("runs the trained fragment leaf model inside WASM at depth three", async () => {
+  for (const [lexicon, seed] of [["CSW24", 41_024], ["NWL23", 29_123]] as const) {
+    const game = new KvadratGame(await loadAssets(lexicon, true, true), seededRandom(seed));
+    try {
+      const plan = game.findBestMove(3, 64);
+      assert.ok(plan, `${lexicon} fragment search did not return a move`);
+      assert.equal(plan.depth, 3);
+      assert.ok(plan.nodes > 1_000);
+      assert.equal(game.executeBotPlan(plan), true);
+    } finally {
+      game.dispose();
     }
   }
 });

@@ -285,7 +285,7 @@ export async function loadGameAssets(lexicon: LexiconId = "CSW24"): Promise<Game
     .filter((bag) => bag.length >= 28)
     .map((bag) => bag.slice(0, 28));
 
-  const strategy = await loadWasmStrategy(kwgBuffer);
+  const strategy = await loadWasmStrategy(kwgBuffer, lexicon === "NWL23" ? 1 : 0);
   return { kwg, wordBags, strategy };
 }
 
@@ -857,6 +857,13 @@ export class KvadratGame {
         letters: this.letterQueue[index].split(""),
       });
     }
+    const leafVisible: SearchPiece[] = [];
+    for (let index = searchDepth - 1; index < searchDepth + 4; index += 1) {
+      leafVisible.push({
+        piece: this.pieceQueue[index],
+        letters: this.letterQueue[index].split(""),
+      });
+    }
 
     if (this.strategy) {
       const result = this.strategy.findBestMove(
@@ -868,6 +875,10 @@ export class KvadratGame {
         })),
         searchDepth,
         width,
+        leafVisible.map((piece) => ({
+          piece: PIECE_NAMES.indexOf(piece.piece),
+          letters: piece.letters.join(""),
+        })),
       );
       return result ? this.botPlanFromStrategy(result) : null;
     }

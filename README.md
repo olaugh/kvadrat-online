@@ -12,7 +12,7 @@ playable includes:
 - flagship CSW24 and NWL23 English word validation
 - a ghost piece, lock delay, wall kicks, and a 40-line finish
 - keyboard and standard Gamepad API controls
-- four-piece, lexicon-aware Rust/WASM beam-search hints and autoplay
+- four-ply, lexicon-aware Rust/WASM beam-search hints and autoplay
 - responsive, high-resolution, procedurally rendered UI
 - device-local high scores
 
@@ -24,6 +24,12 @@ expansion all stay inside WASM. It scores banked words exactly and balances live
 word material against holes, height, surface roughness, wells, and the limited
 40-line budget. Use **Hint** to inspect its recommendation or **Watch bot** to
 let it play.
+
+The crate also contains an experimental learned leaf evaluator. Its native
+Rust tensorizer, trainer, evaluator, compact model exporter, dependency-free
+inference implementation, and WASM ABI are complete. The first model is not
+enabled in autoplay: a seed-disjoint 400-game paired run did not beat the
+heuristic, so the production bot deliberately retains the baseline policy.
 
 ## Controls
 
@@ -83,6 +89,69 @@ Markdown quality report with:
 ```bash
 npm run analyze-self-play -- --input training-data/your-run
 ```
+
+## Fragment model experiments
+
+Prepare leakage-safe, memory-mapped train/validation/test tensors from a
+completed corpus with native Rust:
+
+```bash
+npm run prepare-fragments -- prepare \
+  --input training-data/your-run \
+  --output training-data/fragments
+```
+
+Episode seeds are avalanche-hashed before the 80/10/10 split so CSW24 and
+NWL23 are represented in every partition. Search depth is retained only for
+audits; it is excluded from deployed model inputs. Train the full lexical model
+and its masked-letter context control on CPU:
+
+```bash
+npm run train-fragments -- \
+  --data training-data/fragments \
+  --output training-data/fragment-full \
+  --device cpu --input-mode full --epochs 3
+
+npm run train-fragments -- \
+  --data training-data/fragments \
+  --output training-data/fragment-context \
+  --device cpu --input-mode mask-word-inputs --epochs 3
+```
+
+The shared row encoder sees letters, gaps, column geometry, the next five
+pieces, line budget, lexicon, and three boundary states: empty edge, adjacent
+cells of the same tetromino color, or different colors. It predicts score and
+word-quality returns without enumerating possible completions. Export either
+Candle safetensors checkpoint to the fixed-size dependency-free inference
+format with:
+
+```bash
+npm run export-fragment -- \
+  --input training-data/fragment-full/model.safetensors \
+  --output public/data/models/fragment-full.kfm
+```
+
+For a paired policy test, run baseline and candidate games with identical
+seeds, then compare them:
+
+```bash
+npm run self-play -- --games 400 --hours 1 --depths 3 --seed 3512640997 \
+  --output training-data/eval-baseline
+
+npm run self-play -- --games 400 --hours 1 --depths 3 --seed 3512640997 \
+  --fragment-full public/data/models/fragment-full-v4.kfm \
+  --fragment-context public/data/models/fragment-context-v4.kfm \
+  --fragment-weight 0.25 --fragment-candidates 6 \
+  --output training-data/eval-candidate
+
+npm run compare-self-play -- \
+  --baseline training-data/eval-baseline \
+  --candidate training-data/eval-candidate
+```
+
+Model hashes, held-out prediction metrics, rerank settings, and the rejected
+paired result are recorded in `public/data/models/MANIFEST.json`. Training data
+and checkpoints remain intentionally excluded from Git.
 
 ## Game data
 
