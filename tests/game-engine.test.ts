@@ -5,8 +5,8 @@ import { KvadratGame } from "../app/game-engine.ts";
 
 async function loadAssets() {
   const [kwgBuffer, bagsText] = await Promise.all([
-    readFile(new URL("../public/data/CSW21.kwg", import.meta.url)),
-    readFile(new URL("../public/data/csw21-bags.txt", import.meta.url), "utf8"),
+    readFile(new URL("../public/data/CSW24.kwg", import.meta.url)),
+    readFile(new URL("../public/data/csw24-bags.txt", import.meta.url), "utf8"),
   ]);
   const view = new DataView(kwgBuffer.buffer, kwgBuffer.byteOffset, kwgBuffer.byteLength);
   const kwg = new Uint32Array(kwgBuffer.byteLength / 4);
@@ -35,4 +35,14 @@ test("creates and advances a playable 40-line game", async () => {
   const advanced = game.getSnapshot();
   assert.ok(["playing", "clearing", "over", "complete"].includes(advanced.phase));
   assert.ok(advanced.pieces > 1);
+});
+
+test("validates CSW24-specific additions", async () => {
+  const game = new KvadratGame(await loadAssets());
+  assert.equal(game.isValidWord("UWU"), true);
+  assert.equal(game.isValidWord("OWO"), true);
+  assert.equal(game.isValidWord("FAV"), true);
+  assert.equal(game.isValidWord("NERF"), true);
+  assert.equal(game.isValidWord("RESPAWN"), true);
+  assert.equal(game.isValidWord("ALF"), false);
 });

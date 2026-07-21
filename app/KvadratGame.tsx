@@ -228,7 +228,7 @@ export default function KvadratGameView() {
       <main className="loading-screen">
         <div className="load-mark">K</div>
         <h1>Building the letter bag…</h1>
-        <p>Loading CSW21 and preparing your first seven pieces.</p>
+        <p>Loading CSW24 and preparing your first seven pieces.</p>
       </main>
     );
   }
@@ -250,7 +250,7 @@ export default function KvadratGameView() {
         <div className="mode-heading">
           <span className="eyebrow">SOLO</span>
           <strong>40 LINES</strong>
-          <span className="ruleset">English · CSW21</span>
+          <span className="ruleset">English · CSW24</span>
         </div>
         <div className="session-actions">
           <span className={`status-pill ${snapshot.phase}`}><i />{phaseLabel}</span>

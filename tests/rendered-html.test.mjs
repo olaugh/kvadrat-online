@@ -22,7 +22,7 @@ test("server-renders the Kvadrat game shell", async () => {
   const html = await response.text();
   assert.match(html, /<title>Kvadrat — Words Under Pressure<\/title>/i);
   assert.match(html, /Building the letter bag/);
-  assert.match(html, /CSW21/);
+  assert.match(html, /CSW24/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
 

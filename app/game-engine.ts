@@ -155,12 +155,12 @@ function scoreWord(text: string): number {
 
 export async function loadGameAssets(): Promise<GameAssets> {
   const [kwgResponse, bagsResponse] = await Promise.all([
-    fetch("/data/CSW21.kwg"),
-    fetch("/data/csw21-bags.txt"),
+    fetch("/data/CSW24.kwg"),
+    fetch("/data/csw24-bags.txt"),
   ]);
 
   if (!kwgResponse.ok || !bagsResponse.ok) {
-    throw new Error("Could not load the CSW21 game data.");
+    throw new Error("Could not load the CSW24 game data.");
   }
 
   const [kwgBuffer, bagsText] = await Promise.all([
@@ -312,6 +312,10 @@ export class KvadratGame {
     if (this.phase === "over" || this.phase === "complete") return false;
     this.paused = !this.paused;
     return true;
+  }
+
+  isValidWord(text: string): boolean {
+    return this.isWord(text.trim().toUpperCase());
   }
 
   private canControl(): boolean {
