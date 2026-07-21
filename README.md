@@ -62,14 +62,17 @@ npm run build:wasm
 
 ## Self-play data
 
-Generate checkpointed, gzip-compressed JSONL trajectories for training a leaf
-position evaluator with:
+Generate checkpointed, gzip-compressed JSONL trajectories with the native Rust
+self-play runner. Stable Rust is required for this command:
 
 ```bash
-npm run self-play -- --hours 8 --depths 2,3,4
+npm run self-play -- --hours 8 --depths 2,3,3,3
 ```
 
-The generator alternates CSW24 and NWL23, uses reproducible per-game seeds,
+The generator runs one fully native game per worker and defaults to all but one
+available CPU thread. Override that with `--threads N`; repeat a depth in
+`--depths` to weight the policy mix. It alternates CSW24 and NWL23, uses
+reproducible per-game seeds, preserves game-index output order across workers,
 and records raw boards, visible pieces, structural heuristics, chosen moves,
 4/8/16-placement returns, and terminal score-to-go labels. Generated corpora
 are written under `training-data/` and intentionally excluded from Git.

@@ -223,8 +223,10 @@ struct Text {
 
 impl Text {
     fn from_slice(letters: &[u8]) -> Self {
-        let mut text = Self::default();
-        text.len = letters.len() as u8;
+        let mut text = Self {
+            len: letters.len() as u8,
+            ..Self::default()
+        };
         text.letters[..letters.len()].copy_from_slice(letters);
         text
     }
@@ -242,19 +244,10 @@ struct Word {
     score: i32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct WordList {
     len: u8,
     items: [Word; 20],
-}
-
-impl Default for WordList {
-    fn default() -> Self {
-        Self {
-            len: 0,
-            items: [Word::default(); 20],
-        }
-    }
 }
 
 impl WordList {
@@ -302,19 +295,10 @@ impl CandidateList {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct TextList {
     len: u8,
     items: [Text; 4],
-}
-
-impl Default for TextList {
-    fn default() -> Self {
-        Self {
-            len: 0,
-            items: [Text::default(); 4],
-        }
-    }
 }
 
 impl TextList {
@@ -352,6 +336,22 @@ struct Placement {
 
 #[derive(Clone, Copy)]
 struct Evaluation {
+    #[cfg(not(target_arch = "wasm32"))]
+    heights: [i32; BOARD_WIDTH],
+    #[cfg(not(target_arch = "wasm32"))]
+    holes: i32,
+    #[cfg(not(target_arch = "wasm32"))]
+    buried_depth: i32,
+    #[cfg(not(target_arch = "wasm32"))]
+    aggregate_height: i32,
+    #[cfg(not(target_arch = "wasm32"))]
+    maximum_height: i32,
+    #[cfg(not(target_arch = "wasm32"))]
+    bumpiness: i32,
+    #[cfg(not(target_arch = "wasm32"))]
+    wells: i32,
+    #[cfg(not(target_arch = "wasm32"))]
+    word_potential: f64,
     value: f64,
     setup_words: TextList,
 }
@@ -551,13 +551,13 @@ fn simulate_placements(lexicon: &[u32], board: &Board, piece: SearchPiece) -> Ve
                 let mut cleared = [false; BOARD_HEIGHT];
                 let mut clearing_count = 0u8;
                 let mut words = WordList::default();
-                for board_row in 0..BOARD_HEIGHT {
+                for (board_row, is_cleared) in cleared.iter_mut().enumerate() {
                     let start = board_row * BOARD_WIDTH;
                     if placed_board[start..start + BOARD_WIDTH]
                         .iter()
                         .all(|&cell| cell != 0)
                     {
-                        cleared[board_row] = true;
+                        *is_cleared = true;
                         clearing_count += 1;
                         let row_cells: &[u8; BOARD_WIDTH] = placed_board
                             [start..start + BOARD_WIDTH]
@@ -570,8 +570,8 @@ fn simulate_placements(lexicon: &[u32], board: &Board, piece: SearchPiece) -> Ve
 
                 let mut collapsed = [0u8; BOARD_CELLS];
                 let mut destination_row = clearing_count as usize;
-                for source_row in 0..BOARD_HEIGHT {
-                    if cleared[source_row] {
+                for (source_row, &is_cleared) in cleared.iter().enumerate() {
+                    if is_cleared {
                         continue;
                     }
                     let source = source_row * BOARD_WIDTH;
@@ -672,7 +672,26 @@ fn evaluate_board(lexicon: &[u32], board: &Board) -> Evaluation {
         - (maximum_height * maximum_height) as f64 * 1.7
         - bumpiness as f64 * 8.0
         - wells as f64 * 3.0;
-    Evaluation { value, setup_words }
+    Evaluation {
+        #[cfg(not(target_arch = "wasm32"))]
+        heights,
+        #[cfg(not(target_arch = "wasm32"))]
+        holes,
+        #[cfg(not(target_arch = "wasm32"))]
+        buried_depth,
+        #[cfg(not(target_arch = "wasm32"))]
+        aggregate_height,
+        #[cfg(not(target_arch = "wasm32"))]
+        maximum_height,
+        #[cfg(not(target_arch = "wasm32"))]
+        bumpiness,
+        #[cfg(not(target_arch = "wasm32"))]
+        wells,
+        #[cfg(not(target_arch = "wasm32"))]
+        word_potential,
+        value,
+        setup_words,
+    }
 }
 
 fn compare_states(left: &SearchState, right: &SearchState) -> Ordering {
@@ -769,6 +788,184 @@ fn search(
         nodes,
         evaluation: js_round(best.value),
     })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native {
+    use super::*;
+
+    pub const WIDTH: usize = BOARD_WIDTH;
+    pub const HEIGHT: usize = BOARD_HEIGHT;
+    pub const CELL_COUNT: usize = BOARD_CELLS;
+    pub type PackedBoard = [u8; CELL_COUNT];
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Piece {
+        pub kind: u8,
+        pub letters: [u8; 4],
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct ScoredWord {
+        pub start: u8,
+        pub end: u8,
+        pub text: String,
+        pub score: i32,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct BoardEvaluation {
+        pub heights: [i32; WIDTH],
+        pub holes: i32,
+        pub buried_depth: i32,
+        pub aggregate_height: i32,
+        pub maximum_height: i32,
+        pub bumpiness: i32,
+        pub wells: i32,
+        pub word_potential: f64,
+        pub setup_words: Vec<String>,
+        pub heuristic_value: f64,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct SearchOutcome {
+        pub board: PackedBoard,
+        pub letter_shift: u8,
+        pub rotation: u8,
+        pub row: i8,
+        pub col: i8,
+        pub immediate_score: i32,
+        pub immediate_lines: u8,
+        pub immediate_words: Vec<ScoredWord>,
+        pub projected_score: i32,
+        pub projected_lines: u16,
+        pub setup_words: Vec<String>,
+        pub depth: u8,
+        pub nodes: u32,
+        pub evaluation: i32,
+    }
+
+    pub struct Strategy {
+        lexicon: Vec<u32>,
+    }
+
+    fn text_to_string(text: &Text) -> String {
+        text.as_slice()
+            .iter()
+            .map(|&letter| char::from(b'A' + letter - 1))
+            .collect()
+    }
+
+    fn words_to_vec(words: &WordList) -> Vec<ScoredWord> {
+        words
+            .as_slice()
+            .iter()
+            .map(|word| ScoredWord {
+                start: word.start,
+                end: word.end,
+                text: text_to_string(&word.text),
+                score: word.score,
+            })
+            .collect()
+    }
+
+    fn texts_to_vec(texts: &TextList) -> Vec<String> {
+        texts.as_slice().iter().map(text_to_string).collect()
+    }
+
+    impl Strategy {
+        pub fn from_kwg_bytes(bytes: &[u8]) -> Result<Self, String> {
+            if bytes.len() < 8 || !bytes.len().is_multiple_of(4) {
+                return Err("KWG must contain at least two little-endian u32 nodes".to_string());
+            }
+            let lexicon = bytes
+                .chunks_exact(4)
+                .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("four-byte KWG node")))
+                .collect();
+            Ok(Self { lexicon })
+        }
+
+        pub fn is_word(&self, letters: &[u8]) -> bool {
+            super::is_word(&self.lexicon, letters)
+        }
+
+        pub fn can_spawn(&self, board: &PackedBoard, piece: u8) -> bool {
+            piece < 7
+                && !board.iter().any(|&cell| !valid_cell(cell))
+                && (!collides(board, piece, 0, 1, 3) || !collides(board, piece, 0, 0, 3))
+        }
+
+        pub fn evaluate(&self, board: &PackedBoard) -> Option<BoardEvaluation> {
+            if board.iter().any(|&cell| !valid_cell(cell)) {
+                return None;
+            }
+            let evaluation = evaluate_board(&self.lexicon, board);
+            Some(BoardEvaluation {
+                heights: evaluation.heights,
+                holes: evaluation.holes,
+                buried_depth: evaluation.buried_depth,
+                aggregate_height: evaluation.aggregate_height,
+                maximum_height: evaluation.maximum_height,
+                bumpiness: evaluation.bumpiness,
+                wells: evaluation.wells,
+                word_potential: evaluation.word_potential,
+                setup_words: texts_to_vec(&evaluation.setup_words),
+                heuristic_value: evaluation.value,
+            })
+        }
+
+        pub fn find_best_move(
+            &self,
+            board: &PackedBoard,
+            current_lines: u8,
+            sequence: &[Piece],
+            beam_width: usize,
+        ) -> Option<SearchOutcome> {
+            if sequence.is_empty()
+                || sequence.len() > 5
+                || board.iter().any(|&cell| !valid_cell(cell))
+                || sequence.iter().any(|piece| {
+                    piece.kind >= 7
+                        || piece
+                            .letters
+                            .iter()
+                            .any(|letter| !(1..=26).contains(letter))
+                })
+            {
+                return None;
+            }
+            let search_pieces: Vec<SearchPiece> = sequence
+                .iter()
+                .map(|piece| SearchPiece {
+                    piece: piece.kind,
+                    letters: piece.letters,
+                })
+                .collect();
+            let result = search(
+                &self.lexicon,
+                *board,
+                current_lines,
+                &search_pieces,
+                beam_width.clamp(12, 160),
+            )?;
+            Some(SearchOutcome {
+                board: result.root.board,
+                letter_shift: result.root.letter_shift,
+                rotation: result.root.rotation,
+                row: result.root.row,
+                col: result.root.col,
+                immediate_score: result.root.score,
+                immediate_lines: result.root.lines,
+                immediate_words: words_to_vec(&result.immediate_words),
+                projected_score: result.projected_score,
+                projected_lines: result.projected_lines,
+                setup_words: texts_to_vec(&result.setup_words),
+                depth: result.depth,
+                nodes: result.nodes,
+                evaluation: result.evaluation,
+            })
+        }
+    }
 }
 
 struct Writer<'a> {

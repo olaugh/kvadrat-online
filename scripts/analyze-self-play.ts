@@ -261,13 +261,20 @@ let provenanceAudit: {
 
 try {
   const provenance = JSON.parse(await readFile(resolve(options.input, "PROVENANCE.json"), "utf8"));
+  const nativeRust = provenance.generator.kind === "native-rust";
+  const engineSource = nativeRust
+    ? new URL("../wasm-strategy/src/lib.rs", import.meta.url)
+    : new URL("../app/game-engine.ts", import.meta.url);
+  const generatorSource = nativeRust
+    ? new URL("../wasm-strategy/src/bin/kvadrat-self-play.rs", import.meta.url)
+    : new URL("generate-self-play.ts", import.meta.url);
   const checks: Record<string, boolean> = {
     startedAt: provenance.run.startedAt === manifest.startedAt,
     deadline: provenance.run.deadline === manifest.deadline,
     seed: provenance.run.baseSeed === manifest.options.seed,
     hours: provenance.run.requestedHours === manifest.options.hours,
-    engine: sha256(await readFile(new URL("../app/game-engine.ts", import.meta.url))) === provenance.generator.engineSha256,
-    generator: sha256(await readFile(new URL("generate-self-play.ts", import.meta.url))) === provenance.generator.generatorSha256,
+    engine: sha256(await readFile(engineSource)) === provenance.generator.engineSha256,
+    generator: sha256(await readFile(generatorSource)) === provenance.generator.generatorSha256,
     csw24Kwg: sha256(await readFile(new URL("../public/data/CSW24.kwg", import.meta.url))) === provenance.assets.CSW24.kwgSha256,
     csw24Bags: sha256(await readFile(new URL("../public/data/csw24-bags.txt", import.meta.url))) === provenance.assets.CSW24.bagsSha256,
     nwl23Kwg: sha256(await readFile(new URL("../public/data/NWL23.kwg", import.meta.url))) === provenance.assets.NWL23.kwgSha256,

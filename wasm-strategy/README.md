@@ -1,6 +1,6 @@
 # Kvadrat strategy kernel
 
-This dependency-free Rust crate owns the performance-sensitive strategy path:
+This Rust crate owns the performance-sensitive strategy path:
 
 - DAWG membership checks
 - row segmentation and scoring
@@ -13,6 +13,12 @@ The browser keeps authoritative game state, input, rendering, and bot-plan
 presentation in TypeScript. It sends one compact board plus the known piece
 sequence to WASM per requested move. The result contains only the selected root
 placement and projected metrics.
+
+For offline work, `kvadrat-self-play` links the same core as a native Rust
+library. It runs independent deterministic games across CPU workers without a
+Node or WASM search layer and writes the existing gzip JSONL training schema.
+Native-only serialization and compression dependencies are excluded from the
+WASM target.
 
 ## ABI
 
@@ -41,6 +47,16 @@ npm run build:wasm
 The build copies the optimized module to `public/wasm/kvadrat-strategy.wasm`
 and writes its reproducibility manifest. Normal application builds consume the
 checked artifact and do not invoke Cargo.
+
+Run native multithreaded self-play through the repository command:
+
+```bash
+npm run self-play -- --hours 8 --depths 2,3,3,3 --threads 8
+```
+
+On the 18-game mixed depth-2/3 scheduling check used for this port, one worker
+took 25.2 seconds and 17 workers took 3.85 seconds. Both runs emitted the same
+1,906 records in the same game-index order after timestamp normalization.
 
 ## Reference and parity
 

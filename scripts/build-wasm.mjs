@@ -23,7 +23,7 @@ const rustup = rustupCandidates.find((candidate) =>
   existsSync(candidate) || succeeds(candidate, ["--version"]));
 
 let command = "cargo";
-let args = ["build", "--manifest-path", manifest, "--target", "wasm32-unknown-unknown", "--release"];
+let args = ["build", "--manifest-path", manifest, "--lib", "--target", "wasm32-unknown-unknown", "--release"];
 const env = { ...process.env };
 if (rustup) {
   const located = spawnSync(rustup, ["which", "rustc", "--toolchain", "stable"], { encoding: "utf8" });
