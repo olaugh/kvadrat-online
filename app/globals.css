@@ -99,7 +99,12 @@ button:disabled { opacity: .42; cursor: default; transform: none; }
 .mode-heading { display: flex; align-items: baseline; gap: 10px; }
 .eyebrow { color: var(--accent); font-size: .62rem; font-weight: 750; letter-spacing: .15em; }
 .mode-heading strong { font-size: .96rem; letter-spacing: .08em; }
-.ruleset { color: var(--muted); font-size: .65rem; padding-left: 10px; border-left: 1px solid var(--panel-line); }
+.lexicon-select { display: inline-flex; align-items: center; gap: 5px; padding-left: 10px; border-left: 1px solid var(--panel-line); color: var(--muted); font-size: .65rem; }
+.lexicon-select select { max-width: 190px; border: 0; border-radius: 5px; background: transparent; color: #b6c1d2; padding: 3px 18px 3px 2px; font: inherit; font-weight: 650; cursor: pointer; }
+.lexicon-select select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lexicon-select select option { background: #111927; color: var(--text); }
+.lexicon-select.compact { display: none; padding-left: 0; border-left: 0; }
+.lexicon-select.compact select { width: 76px; padding: 6px 4px; border: 1px solid var(--panel-line); background: rgba(255,255,255,.045); font-size: .6rem; }
 
 .session-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
 .status-pill {
@@ -337,6 +342,7 @@ kbd { min-width: 20px; padding: 3px 5px; border: 1px solid rgba(181,198,225,.17)
   .game-shell { padding: 0 12px; }
   .topbar { grid-template-columns: 1fr auto; min-height: 70px; }
   .mode-heading { display: none; }
+  .lexicon-select.compact { display: inline-flex; }
   .session-actions .status-pill, .session-actions button:not(.primary-action):not(.bot-toggle) { display: none; }
   .game-layout { grid-template-columns: 1fr auto; align-items: start; gap: 10px; padding: 12px 0; }
   .stats-panel { grid-column: 1; grid-row: 1; }
@@ -359,6 +365,7 @@ kbd { min-width: 20px; padding: 3px 5px; border: 1px solid rgba(181,198,225,.17)
   .brand-group p { display: none; }
   .brand-mark { width: 32px; }
   .brand-group h1 { font-size: .8rem; }
+  .lexicon-select.compact select { width: 66px; }
   .primary-action { padding: .55rem .7rem; }
   .game-layout { display: flex; flex-direction: column; align-items: center; }
   .board { width: min(92vw, 340px); height: auto; }

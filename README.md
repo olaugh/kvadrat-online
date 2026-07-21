@@ -8,11 +8,11 @@ This repository is a fresh web port of the original Raylib prototype. The first
 playable includes:
 
 - the original 10 × 22 field with 20 visible rows
-- seven-bag tetrominos and four-letter CSW24 bags
-- CSW24 word validation and original word scoring
+- seven-bag tetrominos and lexicon-specific four-letter bags
+- flagship CSW24 and NWL23 English word validation
 - a ghost piece, lock delay, wall kicks, and a 40-line finish
 - keyboard and standard Gamepad API controls
-- four-piece, CSW24-aware beam-search hints and autoplay
+- four-piece, lexicon-aware beam-search hints and autoplay
 - responsive, high-resolution, procedurally rendered UI
 - device-local high scores
 
@@ -48,13 +48,12 @@ test.
 
 ## Game data
 
-The web build uses a CSW24 KWG and reproducible four-letter bags generated from
-the complete CSW24 list with the original prototype's tile-distribution
-algorithm. Regenerate the bags with:
+The web build ships CSW24 for World English and NWL23 for North American
+English. Each ruleset has its own KWG, reproducible four-letter bags, bot
+search, and device-local high score. The bags use the original prototype's
+tile-distribution algorithm. Regenerate either set with:
 
 ```bash
 node scripts/generate-word-bags.mjs /path/to/CSW24.txt public/data/csw24-bags.txt
+node scripts/generate-word-bags.mjs /path/to/NWL23.txt public/data/nwl23-bags.txt
 ```
-
-Future versions will make dictionaries and language packs modular ruleset
-assets.

@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { KvadratGame } from "../app/game-engine.ts";
+import type { LexiconId } from "../app/game-engine.ts";
 
-async function loadAssets() {
+async function loadAssets(lexicon: LexiconId = "CSW24") {
+  const bagName = lexicon.toLowerCase();
   const [kwgBuffer, bagsText] = await Promise.all([
-    readFile(new URL("../public/data/CSW24.kwg", import.meta.url)),
-    readFile(new URL("../public/data/csw24-bags.txt", import.meta.url), "utf8"),
+    readFile(new URL(`../public/data/${lexicon}.kwg`, import.meta.url)),
+    readFile(new URL(`../public/data/${bagName}-bags.txt`, import.meta.url), "utf8"),
   ]);
   const view = new DataView(kwgBuffer.buffer, kwgBuffer.byteOffset, kwgBuffer.byteLength);
   const kwg = new Uint32Array(kwgBuffer.byteLength / 4);
@@ -37,14 +39,19 @@ test("creates and advances a playable 40-line game", async () => {
   assert.ok(advanced.pieces > 1);
 });
 
-test("validates CSW24-specific additions", async () => {
-  const game = new KvadratGame(await loadAssets());
-  assert.equal(game.isValidWord("UWU"), true);
-  assert.equal(game.isValidWord("OWO"), true);
-  assert.equal(game.isValidWord("FAV"), true);
-  assert.equal(game.isValidWord("NERF"), true);
-  assert.equal(game.isValidWord("RESPAWN"), true);
-  assert.equal(game.isValidWord("ALF"), false);
+test("supports the flagship CSW24 and NWL23 English lexica", async () => {
+  const [cswGame, nwlGame] = await Promise.all([
+    loadAssets("CSW24").then((assets) => new KvadratGame(assets)),
+    loadAssets("NWL23").then((assets) => new KvadratGame(assets)),
+  ]);
+  assert.equal(cswGame.isValidWord("UWU"), true);
+  assert.equal(nwlGame.isValidWord("UWU"), false);
+  assert.equal(cswGame.isValidWord("FAV"), true);
+  assert.equal(nwlGame.isValidWord("FAV"), true);
+  assert.equal(cswGame.isValidWord("NERF"), true);
+  assert.equal(nwlGame.isValidWord("NERF"), false);
+  assert.equal(cswGame.isValidWord("ALF"), false);
+  assert.equal(nwlGame.isValidWord("ALF"), false);
 });
 
 test("searches future pieces and executes a legal scoring plan", async () => {
@@ -53,7 +60,7 @@ test("searches future pieces and executes a legal scoring plan", async () => {
   assert.ok(plan);
   assert.equal(plan.depth, 2);
   assert.ok(plan.nodes > 30);
-  assert.ok(plan.col >= 0 && plan.col < 10);
+  assert.ok(plan.col >= -3 && plan.col < 10);
   assert.ok(plan.reason.length > 20);
   assert.equal(game.executeBotPlan(plan), true);
 

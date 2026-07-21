@@ -3,6 +3,12 @@ export const BOARD_HEIGHT = 22;
 export const VISIBLE_HEIGHT = 20;
 export const MAX_LINES = 40;
 
+export const LEXICA = {
+  CSW24: { name: "CSW24", region: "World English" },
+  NWL23: { name: "NWL23", region: "North American English" },
+} as const;
+export type LexiconId = keyof typeof LEXICA;
+
 export const PIECE_NAMES = ["I", "J", "L", "O", "S", "T", "Z"] as const;
 export type PieceName = (typeof PIECE_NAMES)[number];
 export type GamePhase = "playing" | "clearing" | "paused" | "over" | "complete";
@@ -201,14 +207,15 @@ function scoreWord(text: string): number {
   return rawScore * text.length * text.length;
 }
 
-export async function loadGameAssets(): Promise<GameAssets> {
+export async function loadGameAssets(lexicon: LexiconId = "CSW24"): Promise<GameAssets> {
+  const bagName = lexicon.toLowerCase();
   const [kwgResponse, bagsResponse] = await Promise.all([
-    fetch("/data/CSW24.kwg"),
-    fetch("/data/csw24-bags.txt"),
+    fetch(`/data/${lexicon}.kwg`),
+    fetch(`/data/${bagName}-bags.txt`),
   ]);
 
   if (!kwgResponse.ok || !bagsResponse.ok) {
-    throw new Error("Could not load the CSW24 game data.");
+    throw new Error(`Could not load the ${lexicon} game data.`);
   }
 
   const [kwgBuffer, bagsText] = await Promise.all([

@@ -5,6 +5,8 @@ import {
   BotPlan,
   GameSnapshot,
   KvadratGame,
+  LEXICA,
+  LexiconId,
   MAX_LINES,
   PreviewPiece,
   loadGameAssets,
@@ -47,6 +49,27 @@ function Stat({ label, value, detail }: { label: string; value: string | number;
   );
 }
 
+function LexiconSelect({ value, compact = false, onChange }: {
+  value: LexiconId;
+  compact?: boolean;
+  onChange: (lexicon: LexiconId) => void;
+}) {
+  return (
+    <label className={compact ? "lexicon-select compact" : "lexicon-select"}>
+      {!compact && <span>English ·</span>}
+      <select
+        aria-label="English lexicon"
+        value={value}
+        onChange={(event) => onChange(event.target.value as LexiconId)}
+      >
+        {Object.entries(LEXICA).map(([id, details]) => (
+          <option value={id} key={id}>{details.name} · {details.region}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 export default function KvadratGameView() {
   const engineRef = useRef<KvadratGame | null>(null);
   const heldKeysRef = useRef(new Set<string>());
@@ -63,17 +86,28 @@ export default function KvadratGameView() {
   const [bestScore, setBestScore] = useState(0);
   const [botEnabled, setBotEnabled] = useState(false);
   const [botPlan, setBotPlan] = useState<BotPlan | null>(null);
+  const [lexicon, setLexicon] = useState<LexiconId>("CSW24");
+
+  const selectLexicon = useCallback((nextLexicon: LexiconId) => {
+    if (nextLexicon === lexicon) return;
+    engineRef.current = null;
+    setSnapshot(null);
+    setLoadError("");
+    setBotEnabled(false);
+    setBotPlan(null);
+    setLexicon(nextLexicon);
+  }, [lexicon]);
 
   const applySnapshot = useCallback((nextSnapshot: GameSnapshot) => {
     setSnapshot(nextSnapshot);
     if (nextSnapshot.phase === "complete") {
       setBestScore((currentBest) => {
         if (nextSnapshot.score <= currentBest) return currentBest;
-        window.localStorage.setItem("kvadrat-best-score", String(nextSnapshot.score));
+        window.localStorage.setItem(`kvadrat-best-score-${lexicon}`, String(nextSnapshot.score));
         return nextSnapshot.score;
       });
     }
-  }, []);
+  }, [lexicon]);
 
   const refresh = useCallback(() => {
     if (engineRef.current) applySnapshot(engineRef.current.getSnapshot());
@@ -94,10 +128,12 @@ export default function KvadratGameView() {
 
   useEffect(() => {
     let cancelled = false;
-    loadGameAssets()
+    loadGameAssets(lexicon)
       .then((assets) => {
         if (cancelled) return;
-        setBestScore(Number(window.localStorage.getItem("kvadrat-best-score") ?? 0));
+        const storedBest = window.localStorage.getItem(`kvadrat-best-score-${lexicon}`) ??
+          (lexicon === "CSW24" ? window.localStorage.getItem("kvadrat-best-score") : null);
+        setBestScore(Number(storedBest ?? 0));
         engineRef.current = new KvadratGame(assets);
         applySnapshot(engineRef.current.getSnapshot());
       })
@@ -105,7 +141,7 @@ export default function KvadratGameView() {
         if (!cancelled) setLoadError(error instanceof Error ? error.message : "Game data failed to load.");
       });
     return () => { cancelled = true; };
-  }, [applySnapshot]);
+  }, [applySnapshot, lexicon]);
 
   useEffect(() => {
     const executeKey = (code: string) => {
@@ -272,7 +308,7 @@ export default function KvadratGameView() {
       <main className="loading-screen">
         <div className="load-mark">K</div>
         <h1>Building the letter bag…</h1>
-        <p>Loading CSW24 and preparing your first seven pieces.</p>
+        <p>Loading {lexicon} and preparing your first seven pieces.</p>
       </main>
     );
   }
@@ -294,9 +330,10 @@ export default function KvadratGameView() {
         <div className="mode-heading">
           <span className="eyebrow">SOLO</span>
           <strong>40 LINES</strong>
-          <span className="ruleset">English · CSW24</span>
+          <LexiconSelect value={lexicon} onChange={selectLexicon} />
         </div>
         <div className="session-actions">
+          <LexiconSelect value={lexicon} compact onChange={selectLexicon} />
           <span className={`status-pill ${snapshot.phase}`}><i />{phaseLabel}</span>
           <button
             className={botEnabled ? "bot-toggle active" : "bot-toggle"}
@@ -385,7 +422,7 @@ export default function KvadratGameView() {
           <div className="bot-panel">
             <div className="panel-heading">
               <span>Strategy engine</span>
-              <small>{botEnabled ? "Autoplay" : botPlan ? `Depth ${botPlan.depth}` : "CSW24 beam"}</small>
+              <small>{botEnabled ? "Autoplay" : botPlan ? `Depth ${botPlan.depth}` : `${lexicon} beam`}</small>
             </div>
             <div className="bot-readout" aria-live="polite">
               {botPlan ? (
