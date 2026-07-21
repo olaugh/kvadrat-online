@@ -277,6 +277,7 @@ let decodedPositions = 0;
 let duplicatePositions = 0;
 let compressedBytes = 0;
 let uncompressedBytes = 0;
+const shardChecksums: Array<{ file: string; records: number; bytes: number; sha256: string }> = [];
 const seenPositions = new Set<bigint>();
 const episodes = new Map<string, EpisodeState>();
 const byDepth = new Map<string, GroupStats>();
@@ -312,6 +313,15 @@ function recordError(message: string): void {
 for (const shard of shardEntries as Array<{ file: string; records: number; bytes: number }>) {
   const compressed = await readFile(resolve(options.input, shard.file));
   compressedBytes += compressed.byteLength;
+  shardChecksums.push({
+    file: shard.file,
+    records: shard.records,
+    bytes: compressed.byteLength,
+    sha256: sha256(compressed),
+  });
+  if (compressed.byteLength !== shard.bytes) {
+    errors.push(`${shard.file}: manifest says ${shard.bytes} bytes, found ${compressed.byteLength}`);
+  }
   let raw: string;
   try {
     raw = gunzipSync(compressed).toString();
@@ -472,6 +482,7 @@ const results = {
     uniquePositionHashes: seenPositions.size,
     duplicatePositions,
     duplicateRate: decodedPositions ? duplicatePositions / decodedPositions : 0,
+    shardChecksums,
   },
   quality: {
     valid: errors.length === 0 && invalidRecords === 0,
@@ -523,6 +534,7 @@ ${results.quality.valid ? "**PASS** — every finalized shard, record, episode s
 | Duplicate-position rate | ${percentage(results.volume.duplicateRate)} |
 | Completed episodes | ${rounded(results.outcomes.completedEpisodes)} |
 | Top-outs | ${rounded(results.outcomes.topOutEpisodes)} |
+| Shard checksum manifest | SHARDS.sha256 |
 
 ## Policy and lexicon coverage
 
@@ -585,6 +597,10 @@ Split by episode seed, never by individual position.
 if (options.write) {
   await writeFile(resolve(options.input, "analysis.json"), `${JSON.stringify(results, null, 2)}\n`);
   await writeFile(resolve(options.input, "QUALITY_REPORT.md"), markdown);
+  await writeFile(
+    resolve(options.input, "SHARDS.sha256"),
+    `${results.volume.shardChecksums.map((shard) => `${shard.sha256}  ${shard.file}`).join("\n")}\n`,
+  );
 }
 
 console.log(JSON.stringify({
