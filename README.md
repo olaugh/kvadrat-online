@@ -59,6 +59,28 @@ Run `npm test` for a production build, server-render test, and engine smoke
 test. The test suite also compares Rust/WASM plans and scoring against the
 TypeScript reference across both English lexica and mixed search depths.
 
+GitHub Actions runs the full web and Rust presubmit on every pull request and
+push to `main`. Coverage is enforced at 80% for lines, functions, and branches
+across the TypeScript game core (`game-engine.ts` and `strategy-wasm.ts`), and
+at 80% for lines and functions across the shipping Rust strategy library.
+Offline corpus/training binaries still run under tests and Clippy, but are not
+included in the product-engine coverage denominator.
+
+Run the web coverage gate locally with:
+
+```bash
+npm run test:coverage
+```
+
+For native coverage, install the pinned tool and Rust instrumentation component
+once, then run the complete presubmit:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov --version 0.8.6 --locked
+npm run presubmit
+```
+
 To rebuild `public/wasm/kvadrat-strategy.wasm`, install stable Rust with the
 `wasm32-unknown-unknown` target and run:
 

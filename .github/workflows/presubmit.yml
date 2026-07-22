@@ -1,0 +1,60 @@
+name: Presubmit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: presubmit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: Web / coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.17.0
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run test:coverage
+
+  rust:
+    name: Rust / coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: wasm-strategy
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: >-
+          rustup toolchain install stable --profile minimal
+          --component rustfmt,clippy,llvm-tools-preview
+          --target wasm32-unknown-unknown
+      - run: rustup default stable
+      - name: Install coverage tool
+        run: cargo install cargo-llvm-cov --version 0.8.6 --locked
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-targets --all-features
+      - name: Check WASM target
+        run: cargo check --target wasm32-unknown-unknown --lib
+        env:
+          RUSTFLAGS: -Dwarnings
+      - name: Enforce 80% native engine coverage
+        run: >-
+          cargo llvm-cov --tests --summary-only
+          --ignore-filename-regex 'src/bin/'
+          --fail-under-lines 80
+          --fail-under-functions 80

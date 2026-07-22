@@ -902,3 +902,87 @@ fn main() {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(topped_out: bool) -> CounterfactualRecord {
+        let mut board = [0u8; 220];
+        board[219] = 1 | (1 << 5);
+        CounterfactualRecord {
+            board,
+            visible: [Piece {
+                kind: 0,
+                letters: [1, 2, 3, 4],
+            }; 5],
+            current_lines: 17,
+            lexicon: 1,
+            rank: 3,
+            seed: 0x1234_5678,
+            step: 321,
+            candidate_count: 9,
+            immediate_score: 125,
+            immediate_lines: 2,
+            immediate_words: 1,
+            immediate_word_length: 5,
+            projected_score: 456,
+            projected_lines: 4,
+            heuristic_value: 12.5,
+            rollout: Rollout {
+                score: 875,
+                lines: 8,
+                words: 3,
+                word_length: 14,
+                placements: 8,
+                completed: false,
+                topped_out,
+            },
+        }
+    }
+
+    #[test]
+    fn counterfactual_record_layout_matches_the_trainer_parser() {
+        let encoded = fixture(false).encode();
+        assert_eq!(encoded.len(), RECORD_BYTES);
+        assert_eq!(encoded[219], 1 | (1 << 5));
+        assert_eq!(&encoded[220..225], &[0, 1, 2, 3, 4]);
+        assert_eq!(encoded[245], 17);
+        assert_eq!(encoded[246], 1);
+        assert_eq!(encoded[247], 3);
+        assert_eq!(
+            u32::from_le_bytes(encoded[248..252].try_into().unwrap()),
+            0x1234_5678
+        );
+        assert_eq!(
+            u16::from_le_bytes(encoded[252..254].try_into().unwrap()),
+            321
+        );
+        assert_eq!(u16::from_le_bytes(encoded[254..256].try_into().unwrap()), 9);
+        assert_eq!(
+            i32::from_le_bytes(encoded[256..260].try_into().unwrap()),
+            125
+        );
+        assert_eq!(
+            i32::from_le_bytes(encoded[274..278].try_into().unwrap()),
+            875
+        );
+        assert_eq!(encoded[284], 8);
+        assert_eq!(encoded[285], 0);
+        assert_eq!(encoded[286], 0);
+        assert_eq!(encoded[287], 0);
+    }
+
+    #[test]
+    fn objective_applies_the_top_out_penalty_exactly_once() {
+        assert_eq!(fixture(false).objective(), 1_000);
+        assert_eq!(fixture(true).objective(), 1_000 - TOP_OUT_PENALTY);
+    }
+
+    #[test]
+    fn deterministic_sampler_uses_both_seed_and_step() {
+        assert_eq!(mixed_hash(42, 7), mixed_hash(42, 7));
+        assert_ne!(mixed_hash(42, 7), mixed_hash(42, 8));
+        assert_ne!(mixed_hash(42, 7), mixed_hash(43, 7));
+    }
+}

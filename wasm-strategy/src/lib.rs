@@ -1,5 +1,8 @@
-use std::alloc::{Layout, alloc, dealloc};
 use std::cmp::Ordering;
+
+#[cfg(target_arch = "wasm32")]
+use std::alloc::{Layout, alloc, dealloc};
+#[cfg(target_arch = "wasm32")]
 use std::slice;
 
 mod fragment_model;
@@ -1007,6 +1010,13 @@ pub mod native {
             super::is_word(&self.lexicon, letters)
         }
 
+        pub fn analyze_row(&self, row: &[u8; WIDTH]) -> Option<Vec<ScoredWord>> {
+            if row.iter().any(|&cell| !valid_cell(cell)) {
+                return None;
+            }
+            Some(words_to_vec(&super::analyze_row(&self.lexicon, row)))
+        }
+
         pub fn can_spawn(&self, board: &PackedBoard, piece: u8) -> bool {
             piece < 7
                 && !board.iter().any(|&cell| !valid_cell(cell))
@@ -1314,12 +1324,14 @@ pub mod native {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 struct Writer<'a> {
     output: &'a mut [u8],
     position: usize,
     failed: bool,
 }
 
+#[cfg(target_arch = "wasm32")]
 impl<'a> Writer<'a> {
     fn new(output: &'a mut [u8]) -> Self {
         Self {
@@ -1364,6 +1376,7 @@ impl<'a> Writer<'a> {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 fn lexicon_from_raw<'a>(pointer: u32, nodes: u32) -> Option<&'a [u32]> {
     if pointer == 0 || nodes < 2 {
         return None;
@@ -1371,6 +1384,7 @@ fn lexicon_from_raw<'a>(pointer: u32, nodes: u32) -> Option<&'a [u32]> {
     Some(unsafe { slice::from_raw_parts(pointer as *const u32, nodes as usize) })
 }
 
+#[cfg(target_arch = "wasm32")]
 fn bytes_from_raw<'a>(pointer: u32, length: u32) -> Option<&'a [u8]> {
     if pointer == 0 || length == 0 {
         return None;
@@ -1378,6 +1392,7 @@ fn bytes_from_raw<'a>(pointer: u32, length: u32) -> Option<&'a [u8]> {
     Some(unsafe { slice::from_raw_parts(pointer as *const u8, length as usize) })
 }
 
+#[cfg(target_arch = "wasm32")]
 fn output_from_raw<'a>(pointer: u32, capacity: u32) -> Option<&'a mut [u8]> {
     if pointer == 0 || capacity == 0 {
         return None;
@@ -1385,6 +1400,7 @@ fn output_from_raw<'a>(pointer: u32, capacity: u32) -> Option<&'a mut [u8]> {
     Some(unsafe { slice::from_raw_parts_mut(pointer as *mut u8, capacity as usize) })
 }
 
+#[cfg(target_arch = "wasm32")]
 fn write_search_result(result: &SearchResult, output: &mut [u8]) -> u32 {
     let mut writer = Writer::new(output);
     writer.u8(1);
@@ -1416,6 +1432,7 @@ fn write_search_result(result: &SearchResult, output: &mut [u8]) -> u32 {
 }
 
 #[unsafe(no_mangle)]
+#[cfg(target_arch = "wasm32")]
 pub extern "C" fn kv_alloc(size: u32) -> u32 {
     if size == 0 {
         return 0;
@@ -1428,6 +1445,7 @@ pub extern "C" fn kv_alloc(size: u32) -> u32 {
 }
 
 #[unsafe(no_mangle)]
+#[cfg(target_arch = "wasm32")]
 pub extern "C" fn kv_dealloc(pointer: u32, size: u32) {
     if pointer == 0 || size == 0 {
         return;
@@ -1438,6 +1456,7 @@ pub extern "C" fn kv_dealloc(pointer: u32, size: u32) {
 }
 
 #[unsafe(no_mangle)]
+#[cfg(target_arch = "wasm32")]
 pub extern "C" fn kv_is_word(
     lexicon_pointer: u32,
     lexicon_nodes: u32,
@@ -1454,6 +1473,7 @@ pub extern "C" fn kv_is_word(
 }
 
 #[unsafe(no_mangle)]
+#[cfg(target_arch = "wasm32")]
 pub extern "C" fn kv_analyze_row(
     lexicon_pointer: u32,
     lexicon_nodes: u32,
@@ -1493,6 +1513,7 @@ pub extern "C" fn kv_analyze_row(
 }
 
 #[unsafe(no_mangle)]
+#[cfg(target_arch = "wasm32")]
 pub extern "C" fn kv_find_best_move(
     lexicon_pointer: u32,
     lexicon_nodes: u32,
